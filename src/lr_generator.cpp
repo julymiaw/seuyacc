@@ -379,24 +379,44 @@ std::string LRGenerator::toPlantUML() const
     for (const ItemSet& itemSet : canonical_collection) {
         ss << "State" << itemSet.state_id << " : ";
 
-        // 打印项集的每个项
-        for (const LRItem& item : itemSet.items) {
-            ss << item.prod.left.name << " -> ";
+        // 使用一个映射来分组相同产生式但不同lookahead的项
+        std::map<std::string, std::vector<Symbol>> groupedItems;
 
-            // 打印产生式右侧，插入点号
+        // 分组项
+        for (const LRItem& item : itemSet.items) {
+            // 构建产生式和点号位置的唯一表示（作为键）
+            std::stringstream itemKey;
+            itemKey << item.prod.left.name << " -> ";
+
+            // 右侧包含点号位置
             for (size_t i = 0; i < item.prod.right.size(); ++i) {
                 if (i == item.dot_position) {
-                    ss << "• ";
+                    itemKey << "• ";
                 }
-                ss << item.prod.right[i].name << " ";
+                itemKey << item.prod.right[i].name << " ";
             }
 
             // 如果点号在最右边
             if (item.dot_position == item.prod.right.size()) {
-                ss << "• ";
+                itemKey << "• ";
             }
 
-            ss << ", " << item.lookahead.name << "\\n";
+            // 将lookahead添加到对应键的集合中
+            groupedItems[itemKey.str()].push_back(item.lookahead);
+        }
+
+        // 现在输出分组后的项
+        for (const auto& group : groupedItems) {
+            ss << group.first << ", ";
+
+            // 输出所有lookahead，用"/"分隔
+            for (size_t i = 0; i < group.second.size(); ++i) {
+                ss << group.second[i].name;
+                if (i < group.second.size() - 1) {
+                    ss << "/";
+                }
+            }
+            ss << "\\n";
         }
         ss << "\n";
     }
