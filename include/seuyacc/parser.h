@@ -40,13 +40,12 @@ public:
     void printParsedInfo() const;
 
 private:
-    void collectNonTerminals(const std::string& filename);
     void parseTokenSection(const std::string& line);
     void parseGrammarRules(const std::string& line);
     void parseStartSymbol(const std::string& line);
     void processProductionPart(const std::string& part);
     void parseProductionRightSide(const std::string& right_side, Production& prod);
-    ElementType determineElementType(const std::string& symbol);
+    void validateNonTerminals();
 
     // 当前正在处理的规则
     std::string current_rule_name;
