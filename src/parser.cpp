@@ -95,8 +95,8 @@ bool YaccParser::parseYaccFile(const std::string& filename)
         }
     }
 
-    // 验证非终结符
-    validateNonTerminals();
+    // 验证符号
+    validateSymbols();
     return true;
 }
 
@@ -132,8 +132,6 @@ void YaccParser::parseTokenSection(const std::string& line)
                 sym.value_type = type_name;
             }
 
-            tokens.push_back(sym);
-            token_map[token] = tokens.size() - 1;
             symbol_table[token] = sym;
         }
     }
@@ -152,9 +150,11 @@ void YaccParser::parseStartSymbol(const std::string& line)
 bool YaccParser::parseDeclarationCode(std::ifstream& file)
 {
     std::string line;
+    declaration_code = "%{\n"; // 保留开始标记
 
     while (std::getline(file, line)) {
         if (line == "%}") {
+            declaration_code += "%}\n"; // 保留结束标记
             return true;
         }
         declaration_code += line + "\n";
@@ -253,12 +253,15 @@ void YaccParser::parseTypeDeclaration(const std::string& line)
         std::istringstream symbols_stream(symbols_str);
         std::string symbol;
         while (symbols_stream >> symbol) {
-            // 将符号与类型关联
-            type_map[symbol] = type_name;
-
             // 如果符号已存在于符号表中，更新其类型
             if (symbol_table.find(symbol) != symbol_table.end()) {
                 symbol_table[symbol].value_type = type_name;
+            } else {
+                Symbol non_term_sym;
+                non_term_sym.name = symbol;
+                non_term_sym.type = ElementType::NON_TERMINAL;
+                non_term_sym.value_type = type_name;
+                symbol_table[symbol] = non_term_sym;
             }
         }
     }
@@ -297,21 +300,39 @@ void YaccParser::parseAssociativity(const std::string& line, Associativity assoc
                 symbol_name = type_matches[2];
             }
 
-            // 更新或添加符号到符号表
-            Symbol sym;
-            sym.name = symbol_name;
-            sym.type = ElementType::TOKEN; // 操作符通常是终结符
-            sym.precedence = current_precedence;
-            sym.assoc = assoc;
-            if (!type_name.empty()) {
-                sym.value_type = type_name;
+            // 检查符号表中是否已存在该符号
+            if (symbol_table.find(symbol_name) != symbol_table.end()) {
+                // 如果符号已存在，更新其优先级和结合性
+                Symbol& existing_sym = symbol_table[symbol_name];
+
+                // 如果是非终结符，将其类型更改为终结符
+                // 因为在优先级和结合性声明中出现的符号必须是终结符
+                if (existing_sym.type == ElementType::NON_TERMINAL) {
+                    existing_sym.type = ElementType::TOKEN;
+                }
+
+                // 设置优先级和结合性
+                existing_sym.precedence = current_precedence;
+                existing_sym.assoc = assoc;
+
+                // 仅当当前符号指定了类型且原符号没有类型时才更新类型
+                if (!type_name.empty() && existing_sym.value_type.empty()) {
+                    existing_sym.value_type = type_name;
+                }
+            } else {
+                // 符号不存在，创建新的符号
+                Symbol sym;
+                sym.name = symbol_name;
+                sym.type = ElementType::TOKEN; // 操作符通常是终结符
+                sym.precedence = current_precedence;
+                sym.assoc = assoc;
+                if (!type_name.empty()) {
+                    sym.value_type = type_name;
+                }
+
+                // 添加到符号表
+                symbol_table[symbol_name] = sym;
             }
-
-            // 添加到符号表
-            symbol_table[symbol_name] = sym;
-
-            // 添加到优先级映射表
-            precedence_map[current_precedence].insert(symbol_name);
         }
     }
 }
@@ -354,9 +375,6 @@ bool YaccParser::parseRule(std::string& buffer, size_t& pos)
     if (!parseRuleName(buffer, pos, rule_name)) {
         return false;
     }
-
-    // 添加规则名到非终结符集合
-    non_terminals.insert(rule_name);
 
     // 跳过空白和注释
     skipWhitespaceAndComments(buffer, pos);
@@ -429,11 +447,27 @@ bool YaccParser::parseProductions(std::string& buffer, size_t& pos, const std::s
 bool YaccParser::parseProduction(std::string& buffer, size_t& pos, const std::string& rule_name)
 {
     Production prod;
+    prod.precedence = 0; // 默认没有优先级
 
     // 设置产生式左部
     Symbol left_sym;
     left_sym.name = rule_name;
     left_sym.type = ElementType::NON_TERMINAL;
+
+    // 如果在声明部分定义了属性，复制这些属性
+    if (symbol_table.find(rule_name) != symbol_table.end()) {
+        if (symbol_table[rule_name].type == ElementType::TOKEN) {
+            std::cerr << "错误: Token '" << rule_name << "' 不能作为产生式左部" << std::endl;
+            return false;
+        }
+
+        // 复制声明部分的类型信息，但保证是非终结符
+        left_sym.value_type = symbol_table[rule_name].value_type;
+    }
+
+    // 将非终结符记录到集合中
+    defined_non_terminals[rule_name] = left_sym;
+
     prod.left = left_sym;
 
     // 跳过空白和注释
@@ -446,7 +480,7 @@ bool YaccParser::parseProduction(std::string& buffer, size_t& pos, const std::st
         return true;
     }
 
-    // 解析产生式右部
+    // 解析产生式右部的所有符号
     while (pos < buffer.size()) {
         skipWhitespaceAndComments(buffer, pos);
 
@@ -455,23 +489,39 @@ bool YaccParser::parseProduction(std::string& buffer, size_t& pos, const std::st
             break;
         }
 
-        // 检查是否为语义动作
-        if (buffer[pos] == '{') {
+        // 检查是否为符号
+        if (buffer[pos] != '{') {
+            // 解析符号
+            Symbol symbol;
+            if (!parseSymbol(buffer, pos, symbol)) {
+                return false;
+            }
+            prod.right.push_back(symbol);
+
+            // 更新产生式的优先级为右部最右边的终结符的优先级
+            if (symbol.type == ElementType::TOKEN && symbol.precedence > 0) {
+                prod.precedence = symbol.precedence;
+            }
+        } else {
+            // 遇到语义动作，确保它是最后一个元素
             std::string action;
             if (!parseSemanticAction(buffer, pos, action)) {
                 return false;
             }
             prod.semantic_action = action;
-            // 假设语义动作必须在产生式的最后
+
+            // 跳过可能的空白和注释
+            skipWhitespaceAndComments(buffer, pos);
+
+            // 确保语义动作后只能是产生式结束符号(; 或 |)
+            if (pos < buffer.size() && buffer[pos] != ';' && buffer[pos] != '|') {
+                std::cerr << "错误: 语义动作只能出现在产生式的最右侧" << std::endl;
+                return false;
+            }
+
+            // 已经遇到语义动作，结束产生式右部解析
             break;
         }
-
-        // 解析符号
-        Symbol symbol;
-        if (!parseSymbol(buffer, pos, symbol)) {
-            return false;
-        }
-        prod.right.push_back(symbol);
     }
 
     // 添加到产生式列表
@@ -503,6 +553,9 @@ bool YaccParser::parseSymbol(std::string& buffer, size_t& pos, Symbol& symbol)
                 pos++; // 跳过结束单引号
                 symbol.name = buffer.substr(start_pos, pos - start_pos);
                 symbol.type = ElementType::LITERAL;
+
+                // 将字面量添加到临时符号表
+                temp_symbols[symbol.name] = symbol;
                 return true;
             } else {
                 escaped = false;
@@ -523,13 +576,17 @@ bool YaccParser::parseSymbol(std::string& buffer, size_t& pos, Symbol& symbol)
             identifier += buffer[pos++];
         }
 
-        symbol.name = identifier;
-
-        // 判断符号类型
-        if (token_map.find(identifier) != token_map.end()) {
-            symbol.type = ElementType::TOKEN;
+        // 判断符号类型并从符号表中复制属性
+        if (symbol_table.find(identifier) != symbol_table.end()) {
+            // 使用符号表中的完整信息
+            symbol = symbol_table[identifier];
         } else {
+            // 未在声明部分定义，假设是非终结符
+            symbol.name = identifier;
             symbol.type = ElementType::NON_TERMINAL;
+
+            // 记录到临时符号表，以便后续验证
+            temp_symbols[identifier] = symbol;
         }
 
         return true;
@@ -667,19 +724,56 @@ bool YaccParser::checkChar(std::string& buffer, size_t pos, char expected)
     return (pos < buffer.size() && buffer[pos] == expected);
 }
 
-void YaccParser::validateNonTerminals()
+void YaccParser::validateSymbols()
 {
-    // 遍历所有产生式
-    for (const auto& prod : productions) {
-        // 检查产生式右部的非终结符是否都在左部出现过
-        for (const auto& symbol : prod.right) {
-            if (symbol.type == ElementType::NON_TERMINAL) {
-                // 检查该非终结符是否在左部出现过
-                if (non_terminals.find(symbol.name) == non_terminals.end()) {
-                    std::cerr << "错误: 非终结符 '" << symbol.name << "' 在右部出现但未在任何左部定义" << std::endl;
-                    throw std::runtime_error("非终结符验证失败");
-                }
+    // 统计未定义的符号和以终结符作为左部的错误
+    int undefined_symbol_count = 0;
+    std::vector<std::string> undefined_symbols;
+
+    // 直接从temp_symbols中提取用作非终结符但未定义的符号
+    for (const auto& [name, symbol] : temp_symbols) {
+        // 如果是被当作非终结符使用，但不在已定义的非终结符集合中
+        if (symbol.type == ElementType::NON_TERMINAL && defined_non_terminals.find(name) == defined_non_terminals.end()) {
+
+            // 检查是否在符号表中被定义为token
+            if (symbol_table.find(name) != symbol_table.end() && symbol_table[name].type == ElementType::TOKEN) {
+                std::cerr << "警告: 符号 \"" << name << "\" 被定义为终结符(token)，"
+                          << "但在产生式右部被当作非终结符使用" << std::endl;
+            } else {
+                undefined_symbol_count++;
+                undefined_symbols.push_back(name);
+                std::cerr << "警告: 符号 \"" << name << "\" 被使用但未被定义为终结符且没有产生式规则"
+                          << std::endl;
             }
+        }
+    }
+
+    // 如果有未定义的符号，显示总数
+    if (undefined_symbol_count > 0) {
+        std::cerr << "警告: " << undefined_symbol_count << " 项非终结语词在文法中无用" << std::endl;
+
+        // 输出每个未定义的符号
+        for (const auto& name : undefined_symbols) {
+            std::cerr << "警告: 非终结语词在文法中无用：" << name << std::endl;
+        }
+    }
+
+    // 现在更新symbol_table，加入所有在语法规则中定义或使用的符号
+    for (const auto& [name, symbol] : temp_symbols) {
+        // 如果符号不在symbol_table中，或者在symbol_table中但需要更新
+        if (symbol_table.find(name) == symbol_table.end() || (symbol_table[name].type != ElementType::TOKEN && symbol.type != ElementType::NON_TERMINAL)) {
+            symbol_table[name] = symbol;
+        }
+    }
+
+    // 将所有产生式左部的非终结符加入symbol_table
+    for (const auto& [name, symbol] : defined_non_terminals) {
+        // 如果符号不在symbol_table中或需要更新
+        if (symbol_table.find(name) == symbol_table.end() || symbol_table[name].type != ElementType::NON_TERMINAL) {
+            symbol_table[name] = symbol;
+        } else if (!symbol.value_type.empty() && symbol_table[name].value_type.empty()) {
+            // 更新类型信息
+            symbol_table[name].value_type = symbol.value_type;
         }
     }
 }
@@ -688,103 +782,30 @@ void YaccParser::printParsedInfo() const
 {
     std::cout << "起始符号: " << start_symbol << std::endl;
 
-    // 改进 Tokens 输出格式
-    std::cout << "\nTokens (" << tokens.size() << "):" << std::endl;
-    for (const auto& token : tokens) {
-        std::cout << "  " << token.name;
-        if (!token.value_type.empty()) {
-            std::cout << " <" << token.value_type << ">";
-        }
+    // 计算终结符和非终结符的数量
+    int token_count = 0;
+    int non_terminal_count = 0;
+    int literal_count = 0;
 
-        // 添加优先级信息
-        if (token.precedence > 0) {
-            std::cout << " [优先级:" << token.precedence;
-
-            // 添加结合性信息
-            switch (token.assoc) {
-            case Associativity::LEFT:
-                std::cout << ", 左结合";
-                break;
-            case Associativity::RIGHT:
-                std::cout << ", 右结合";
-                break;
-            case Associativity::NONASSOC:
-                std::cout << ", 无结合";
-                break;
-            default:
-                break;
-            }
-            std::cout << "]";
-        }
-
-        std::cout << std::endl;
-    }
-
-    // 输出所有非终结符及其类型
-    std::cout << "\n非终结符:" << std::endl;
-    std::set<std::string> printed_non_terminals;
-
-    // 首先添加起始符号
-    if (!start_symbol.empty()) {
-        printed_non_terminals.insert(start_symbol);
-        std::cout << "  " << start_symbol;
-        if (type_map.find(start_symbol) != type_map.end()) {
-            std::cout << " <" << type_map.at(start_symbol) << ">";
-        }
-        std::cout << std::endl;
-    }
-
-    // 添加其他非终结符
-    for (const auto& prod : productions) {
-        if (printed_non_terminals.find(prod.left.name) == printed_non_terminals.end()) {
-            printed_non_terminals.insert(prod.left.name);
-            std::cout << "  " << prod.left.name;
-            if (!prod.left.value_type.empty()) {
-                std::cout << " <" << prod.left.value_type << ">";
-            } else if (type_map.find(prod.left.name) != type_map.end()) {
-                std::cout << " <" << type_map.at(prod.left.name) << ">";
-            }
-            std::cout << std::endl;
+    for (const auto& [name, symbol] : symbol_table) {
+        switch (symbol.type) {
+        case ElementType::TOKEN:
+            token_count++;
+            break;
+        case ElementType::NON_TERMINAL:
+            non_terminal_count++;
+            break;
+        case ElementType::LITERAL:
+            literal_count++;
+            break;
         }
     }
 
-    // 改进优先级和结合性信息输出
-    std::cout << "\n优先级和结合性信息:" << std::endl;
-    for (const auto& [prec, symbols] : precedence_map) {
-        std::cout << "  优先级 " << prec << ": ";
-
-        // 找出该优先级的结合性
-        Associativity assoc = Associativity::NONE;
-        std::string assoc_str = "无";
-
-        if (!symbols.empty()) {
-            const std::string& first_symbol = *symbols.begin();
-            if (symbol_table.find(first_symbol) != symbol_table.end()) {
-                assoc = symbol_table.at(first_symbol).assoc;
-                switch (assoc) {
-                case Associativity::LEFT:
-                    assoc_str = "左";
-                    break;
-                case Associativity::RIGHT:
-                    assoc_str = "右";
-                    break;
-                case Associativity::NONASSOC:
-                    assoc_str = "无";
-                    break;
-                default:
-                    assoc_str = "未知";
-                }
-            }
-        }
-
-        std::cout << "[" << assoc_str << "结合] ";
-
-        // 输出符号
-        for (const auto& symbol : symbols) {
-            std::cout << symbol << " ";
-        }
-        std::cout << std::endl;
-    }
+    // 输出符号统计信息
+    std::cout << "\n符号统计:" << std::endl;
+    std::cout << "  终结符: " << token_count << std::endl;
+    std::cout << "  非终结符: " << non_terminal_count << std::endl;
+    std::cout << "  字面量: " << literal_count << std::endl;
 
     // 输出union定义
     if (!union_code.empty()) {
@@ -792,52 +813,23 @@ void YaccParser::printParsedInfo() const
                   << union_code << std::endl;
     }
 
-    if (!declaration_code.empty()) {
-        std::cout << "\n\n声明代码块:\n"
-                  << declaration_code << std::endl;
-    }
-
     std::cout << "\n\n产生式规则 (" << productions.size() << "):" << std::endl;
     for (const auto& prod : productions) {
         std::cout << prod.left.name << " [";
-        // 可以添加类型信息
-        switch (prod.left.type) {
-        case ElementType::TOKEN:
-            std::cout << "TOKEN";
-            break;
-        case ElementType::NON_TERMINAL:
-            std::cout << "NON_TERM";
-            break;
-        case ElementType::LITERAL:
-            std::cout << "LIT";
-            break;
+        // 添加返回值信息
+        if (!prod.left.value_type.empty()) {
+            std::cout << prod.left.value_type;
         }
 
-        // 添加类型信息
-        if (!prod.left.value_type.empty()) {
-            std::cout << ", " << prod.left.value_type;
+        // 添加优先级信息
+        if (prod.precedence > 0) {
+            std::cout << ", 优先级:" << prod.precedence;
         }
+
         std::cout << "] -> ";
 
         for (const auto& sym : prod.right) {
-            std::cout << sym.name << " [";
-            switch (sym.type) {
-            case ElementType::TOKEN:
-                std::cout << "TOKEN";
-                break;
-            case ElementType::NON_TERMINAL:
-                std::cout << "NON_TERM";
-                break;
-            case ElementType::LITERAL:
-                std::cout << "LIT";
-                break;
-            }
-
-            // 添加类型信息
-            if (!sym.value_type.empty()) {
-                std::cout << ", " << sym.value_type;
-            }
-            std::cout << "] ";
+            std::cout << sym.name << " ";
         }
 
         if (!prod.semantic_action.empty()) {
@@ -845,11 +837,6 @@ void YaccParser::printParsedInfo() const
         }
 
         std::cout << std::endl;
-    }
-
-    if (!program_code.empty()) {
-        std::cout << "\n\n程序代码:\n"
-                  << program_code;
     }
 }
 

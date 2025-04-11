@@ -144,17 +144,22 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirstOfSequence(con
 
 void LRGenerator::buildActionGotoTable()
 {
+    int shift_reduce_conflicts = 0;
+    int resolved_sr_conflicts = 0;
+    int reduce_reduce_conflicts = 0;
+    int resolved_rr_conflicts = 0;
+
     // 从项集规范族构建ACTION和GOTO表
     for (const ItemSet& state : canonical_collection) {
         int stateId = state.state_id;
 
-        // 处理每个项
+        // 先处理所有规约项
         for (const LRItem& item : state.items) {
             // 如果点号在最右边，这是一个规约项
             if (item.dot_position == item.prod.right.size()) {
                 // 特殊处理增广产生式 S' -> S·
                 if (item.prod.left.name == "S'" && item.lookahead.name == "$") {
-                    // 接受动作
+                    // 接受动作 - 优先级最高，不会有冲突
                     action_table[stateId][item.lookahead] = { ActionType::ACCEPT, 0 };
                 } else {
                     // 规约动作，找出产生式在原文法中的索引
@@ -166,23 +171,156 @@ void LRGenerator::buildActionGotoTable()
                         }
                     }
 
-                    // 添加规约动作
-                    action_table[stateId][item.lookahead] = { ActionType::REDUCE, prodIndex };
+                    // 检查是否已经有针对该符号的动作
+                    if (action_table[stateId].find(item.lookahead) != action_table[stateId].end()) {
+                        ActionEntry existing = action_table[stateId][item.lookahead];
+
+                        if (existing.type == ActionType::REDUCE) {
+                            // 规约/规约冲突
+                            reduce_reduce_conflicts++;
+
+                            // 获取两个产生式
+                            const Production& currentProd = parser.productions[prodIndex];
+                            const Production& existingProd = parser.productions[existing.value];
+
+                            // 检查是否可以用优先级解决
+                            bool resolved = false;
+
+                            // 如果两个产生式都有优先级，使用优先级高的
+                            if (currentProd.precedence > 0 && existingProd.precedence > 0) {
+                                if (currentProd.precedence > existingProd.precedence) {
+                                    action_table[stateId][item.lookahead] = { ActionType::REDUCE, prodIndex };
+                                    resolved = true;
+                                } else if (currentProd.precedence < existingProd.precedence) {
+                                    // 保留现有的动作
+                                    resolved = true;
+                                }
+                                // 优先级相同的情况下，保留在文法中先出现的产生式
+                            }
+
+                            if (resolved) {
+                                resolved_rr_conflicts++;
+                                std::cout << "规约/规约冲突已解决(优先级): 状态 " << stateId
+                                          << ", 符号 " << item.lookahead.name << std::endl;
+                            } else {
+                                std::cout << "规约/规约冲突: 状态 " << stateId
+                                          << ", 符号 " << item.lookahead.name
+                                          << ", 产生式 " << prodIndex << " 和产生式 " << existing.value << std::endl;
+
+                                // 默认策略：选择在文法中较早出现的产生式
+                                if (prodIndex < existing.value) {
+                                    action_table[stateId][item.lookahead] = { ActionType::REDUCE, prodIndex };
+                                }
+                            }
+                        }
+                        // 这里不处理移入/规约冲突，因为处理规约项时不可能已经有移入项
+                        // 移入/规约冲突在处理移入项时检测
+                    } else {
+                        // 没有冲突，添加规约动作
+                        action_table[stateId][item.lookahead] = { ActionType::REDUCE, prodIndex };
+                    }
                 }
             }
         }
 
-        // 处理转移
+        // 然后处理所有移入项（即从该状态出发的转移）
         for (const StateTransition& transition : transitions) {
             if (transition.from_state == stateId) {
                 if (transition.symbol.type == ElementType::TOKEN) {
-                    // 移入动作
-                    action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
+                    // 终结符转移对应移入动作
+
+                    // 检查是否已经有针对该符号的规约动作
+                    if (action_table[stateId].find(transition.symbol) != action_table[stateId].end()) {
+                        ActionEntry existing = action_table[stateId][transition.symbol];
+
+                        if (existing.type == ActionType::REDUCE) {
+                            // 移入/规约冲突
+                            shift_reduce_conflicts++;
+
+                            // 获取产生式和向前看符号的信息
+                            const Production& reduceProd = parser.productions[existing.value];
+                            const Symbol& lookAhead = transition.symbol;
+
+                            // 检查是否可以用优先级和结合性解决
+                            bool resolved = false;
+
+                            // 如果产生式有优先级并且冲突符号也有优先级
+                            if (reduceProd.precedence > 0 && parser.symbol_table.find(lookAhead.name) != parser.symbol_table.end() && parser.symbol_table.at(lookAhead.name).precedence > 0) {
+
+                                const Symbol& conflictSymbol = parser.symbol_table.at(lookAhead.name);
+
+                                // 比较优先级
+                                if (reduceProd.precedence > conflictSymbol.precedence) {
+                                    // 规约的优先级更高，选择规约（保留规约动作）
+                                    resolved = true;
+                                } else if (reduceProd.precedence < conflictSymbol.precedence) {
+                                    // 移入的优先级更高，选择移入
+                                    action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
+                                    resolved = true;
+                                } else {
+                                    // 优先级相同，使用结合性决定
+                                    switch (conflictSymbol.assoc) {
+                                    case Associativity::LEFT:
+                                        // 左结合，选择规约（保留规约动作）
+                                        resolved = true;
+                                        break;
+                                    case Associativity::RIGHT:
+                                        // 右结合，选择移入
+                                        action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
+                                        resolved = true;
+                                        break;
+                                    case Associativity::NONASSOC:
+                                        // 无结合性，报错
+                                        action_table[stateId][transition.symbol] = { ActionType::ERROR, 0 };
+                                        resolved = true;
+                                        std::cout << "无结合性操作符 (报错): 状态 " << stateId
+                                                  << ", 符号 " << lookAhead.name << std::endl;
+                                        break;
+                                    default:
+                                        // 无结合性信息
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (resolved) {
+                                resolved_sr_conflicts++;
+                                // std::cout << "移入/规约冲突已解决(优先级/结合性): 状态 " << stateId
+                                //           << ", 符号 " << lookAhead.name << std::endl;
+                            } else {
+                                std::cout << "移入/规约冲突: 状态 " << stateId
+                                          << ", 符号 " << transition.symbol.name
+                                          << ", 移入到状态 " << transition.to_state
+                                          << " 或规约产生式 " << existing.value << std::endl;
+
+                                // 默认策略：选择移入
+                                action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
+                            }
+                        }
+                        // 不应该已经有SHIFT或ACCEPT
+                    } else {
+                        // 没有冲突，添加移入动作
+                        action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
+                    }
                 } else {
-                    // GOTO表项
+                    // 非终结符转移对应GOTO表项
                     goto_table[stateId][transition.symbol] = transition.to_state;
                 }
             }
+        }
+    }
+
+    // 报告冲突总数
+    std::cout << "\n==== 冲突统计 ====" << std::endl;
+    std::cout << "移入/规约冲突: " << shift_reduce_conflicts << " 个，已解决: " << resolved_sr_conflicts << " 个" << std::endl;
+    std::cout << "规约/规约冲突: " << reduce_reduce_conflicts << " 个，已解决: " << resolved_rr_conflicts << " 个" << std::endl;
+    std::cout << "==================" << std::endl;
+
+    if (shift_reduce_conflicts == resolved_sr_conflicts && reduce_reduce_conflicts == resolved_rr_conflicts) {
+        if (shift_reduce_conflicts > 0 || reduce_reduce_conflicts > 0) {
+            std::cout << "所有冲突已通过优先级和结合性规则解决！" << std::endl;
+        } else {
+            std::cout << "文法没有冲突，是LALR(1)文法！" << std::endl;
         }
     }
 }

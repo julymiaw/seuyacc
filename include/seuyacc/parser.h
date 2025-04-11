@@ -3,11 +3,8 @@
 
 #include "production.h"
 #include "symbol.h"
-#include <map>
-#include <set>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace seuyacc {
@@ -15,20 +12,14 @@ namespace seuyacc {
 // 语法文件的解析器
 class YaccParser {
 public:
-    // 存储token声明
-    std::vector<Symbol> tokens;
+    // 构造函数
+    YaccParser()
+        : current_precedence(0)
+    {
+    }
 
     // 存储符号映射 (符号名 -> 符号对象)
     std::unordered_map<std::string, Symbol> symbol_table;
-
-    // 存储token映射 (token名 -> 索引)
-    std::unordered_map<std::string, int> token_map;
-
-    // 存储类型映射 (符号名 -> 类型名)
-    std::unordered_map<std::string, std::string> type_map;
-
-    // 储存优先级信息 (优先级 -> 符号集合)
-    std::map<int, std::set<std::string>> precedence_map;
 
     // 存储语法规则
     std::vector<Production> productions;
@@ -44,9 +35,6 @@ public:
 
     // 程序部分的代码
     std::string program_code;
-
-    // 当前最大优先级
-    int current_precedence;
 
     // 解析Yacc文件的方法
     bool parseYaccFile(const std::string& filename);
@@ -78,13 +66,16 @@ private:
     // 辅助函数
     void skipWhitespaceAndComments(std::string& buffer, size_t& pos);
     bool checkChar(std::string& buffer, size_t pos, char expected);
-    void validateNonTerminals();
+    void validateSymbols();
 
-    // 当前正在处理的规则
-    std::string current_rule_name;
+    // 当前最大优先级
+    int current_precedence;
+
+    // 用于规则验证阶段
+    std::unordered_map<std::string, Symbol> temp_symbols; // 存储解析规则阶段遇到的临时符号如字面量
 
     // 存储所有已知的非终结符
-    std::unordered_set<std::string> non_terminals;
+    std::unordered_map<std::string, Symbol> defined_non_terminals;
 };
 
 } // namespace seuyacc
