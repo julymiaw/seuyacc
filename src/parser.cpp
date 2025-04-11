@@ -60,11 +60,37 @@ bool YaccParser::parseYaccFile(const std::string& filename)
         }
 
         if (in_definitions) {
-            // 处理定义部分
+            // 检查是否为 %union 块
+            if (cleaned_line.substr(0, 6) == "%union") {
+                std::string buffer = cleaned_line.substr(7) + "\n";
+                // 读取更多行直到找到 union 块的结束
+                std::string union_line;
+                while (std::getline(file, union_line)) {
+                    buffer += union_line + "\n";
+                    // 匹配花括号的结束
+                    if (union_line.find('}') != std::string::npos) {
+                        break;
+                    }
+                }
+                size_t pos = 0;
+                if (!parseUnionCode(buffer, pos)) {
+                    return false;
+                }
+                continue;
+            }
+            // 处理定义部分的其他指令
             if (cleaned_line.substr(0, 6) == "%token") {
                 parseTokenSection(cleaned_line);
             } else if (cleaned_line.substr(0, 6) == "%start") {
                 parseStartSymbol(cleaned_line);
+            } else if (cleaned_line.substr(0, 5) == "%type") {
+                parseTypeDeclaration(cleaned_line);
+            } else if (cleaned_line.substr(0, 5) == "%left") {
+                parseAssociativity(cleaned_line, Associativity::LEFT);
+            } else if (cleaned_line.substr(0, 6) == "%right") {
+                parseAssociativity(cleaned_line, Associativity::RIGHT);
+            } else if (cleaned_line.substr(0, 9) == "%nonassoc") {
+                parseAssociativity(cleaned_line, Associativity::NONASSOC);
             }
         }
     }
@@ -76,20 +102,39 @@ bool YaccParser::parseYaccFile(const std::string& filename)
 
 void YaccParser::parseTokenSection(const std::string& line)
 {
-    std::regex token_pattern("%token\\s+(.+)");
-    std::smatch matches;
+    std::string type_name = "";
+    std::string tokens_str = "";
 
-    if (std::regex_search(line, matches, token_pattern)) {
-        std::string token_list = matches[1];
-        std::istringstream iss(token_list);
+    // 匹配带类型的 token 定义: %token<type> ...
+    std::regex token_type_pattern("%token\\s*<([^>]+)>\\s*(.+)");
+    std::smatch type_matches;
+    if (std::regex_search(line, type_matches, token_type_pattern)) {
+        type_name = type_matches[1];
+        tokens_str = type_matches[2];
+    } else {
+        // 匹配普通 token 定义: %token ...
+        std::regex token_pattern("%token\\s+(.+)");
+        std::smatch matches;
+        if (std::regex_search(line, matches, token_pattern)) {
+            tokens_str = matches[1];
+        }
+    }
+
+    if (!tokens_str.empty()) {
+        std::istringstream iss(tokens_str);
         std::string token;
 
         while (iss >> token) {
             Symbol sym;
             sym.name = token;
             sym.type = ElementType::TOKEN;
+            if (!type_name.empty()) {
+                sym.value_type = type_name;
+            }
+
             tokens.push_back(sym);
             token_map[token] = tokens.size() - 1;
+            symbol_table[token] = sym;
         }
     }
 }
@@ -117,6 +162,158 @@ bool YaccParser::parseDeclarationCode(std::ifstream& file)
 
     std::cerr << "错误: 未找到代码块结束标记 %}" << std::endl;
     return false;
+}
+
+// 解析 Union 代码块
+bool YaccParser::parseUnionCode(std::string& buffer, size_t& pos)
+{
+    // 跳过可能的空白字符
+    skipWhitespaceAndComments(buffer, pos);
+
+    // 查找开始的花括号
+    size_t brace_start = buffer.find('{', pos);
+    if (brace_start == std::string::npos) {
+        std::cerr << "错误: %union 缺少开始花括号 '{'" << std::endl;
+        return false;
+    }
+
+    int brace_count = 1; // 已找到一个左花括号
+    pos = brace_start + 1; // 从左花括号的下一个位置开始
+
+    // 使用与parseSemanticAction相似的逻辑处理嵌套括号、引号和注释
+    char quote_type = 0;
+    bool escaped = false;
+    bool in_line_comment = false;
+    bool in_block_comment = false;
+    std::string union_content = "{"; // 包含开始的花括号
+
+    while (pos < buffer.size() && brace_count > 0) {
+        char c = buffer[pos];
+        char next_c = (pos + 1 < buffer.size()) ? buffer[pos + 1] : '\0';
+        union_content += c; // 添加当前字符到union内容
+
+        if (escaped) {
+            escaped = false;
+        } else if (c == '\\' && !in_line_comment && !in_block_comment) {
+            escaped = true;
+        } else if (in_line_comment) {
+            if (c == '\n') {
+                in_line_comment = false;
+            }
+        } else if (in_block_comment) {
+            if (c == '*' && next_c == '/') {
+                in_block_comment = false;
+                union_content += next_c; // 添加'/'到union内容
+                pos++;
+            }
+        } else if (quote_type == 0 && c == '/' && next_c == '/') {
+            in_line_comment = true;
+            union_content += next_c; // 添加第二个'/'到union内容
+            pos++;
+        } else if (quote_type == 0 && c == '/' && next_c == '*') {
+            in_block_comment = true;
+            union_content += next_c; // 添加'*'到union内容
+            pos++;
+        } else if (quote_type == 0 && !in_line_comment && !in_block_comment) {
+            if (c == '\'' || c == '\"') {
+                quote_type = c;
+            } else if (c == '{') {
+                brace_count++;
+            } else if (c == '}') {
+                brace_count--;
+            }
+        } else if (!in_line_comment && !in_block_comment && c == quote_type) {
+            quote_type = 0;
+        }
+
+        pos++;
+    }
+
+    if (brace_count != 0) {
+        std::cerr << "错误: %union 缺少结束花括号 '}'" << std::endl;
+        return false;
+    }
+
+    union_code = union_content;
+    return true;
+}
+
+// 解析类型声明
+void YaccParser::parseTypeDeclaration(const std::string& line)
+{
+    // 匹配 %type<类型>
+    std::regex type_pattern("%type\\s*<([^>]+)>\\s*(.+)");
+    std::smatch matches;
+
+    if (std::regex_search(line, matches, type_pattern)) {
+        std::string type_name = matches[1];
+        std::string symbols_str = matches[2];
+
+        // 分割符号列表
+        std::istringstream symbols_stream(symbols_str);
+        std::string symbol;
+        while (symbols_stream >> symbol) {
+            // 将符号与类型关联
+            type_map[symbol] = type_name;
+
+            // 如果符号已存在于符号表中，更新其类型
+            if (symbol_table.find(symbol) != symbol_table.end()) {
+                symbol_table[symbol].value_type = type_name;
+            }
+        }
+    }
+}
+
+// 解析结合性和优先级声明
+void YaccParser::parseAssociativity(const std::string& line, Associativity assoc)
+{
+    // 首先确保没有注释干扰
+    std::string cleaned_line = std::regex_replace(line, std::regex("//.*$"), "");
+    cleaned_line = std::regex_replace(cleaned_line, std::regex("/\\*.*?\\*/"), ""); // 简单处理块注释
+
+    // 匹配 %left/%right/%nonassoc 后的符号
+    std::regex assoc_pattern("%(left|right|nonassoc)\\s+(.+)");
+    std::smatch matches;
+
+    if (std::regex_search(cleaned_line, matches, assoc_pattern)) {
+        std::string symbols_str = matches[2];
+
+        // 增加优先级计数
+        current_precedence++;
+
+        // 分割符号列表
+        std::istringstream symbols_stream(symbols_str);
+        std::string symbol;
+        while (symbols_stream >> symbol) {
+            // 检查符号是否带有类型声明
+            std::string symbol_name = symbol;
+            std::string type_name = "";
+
+            // 处理带类型的符号，如 <type>symbol
+            std::regex typed_symbol_pattern("<([^>]+)>\\s*([^\\s]+)");
+            std::smatch type_matches;
+            if (std::regex_search(symbol, type_matches, typed_symbol_pattern)) {
+                type_name = type_matches[1];
+                symbol_name = type_matches[2];
+            }
+
+            // 更新或添加符号到符号表
+            Symbol sym;
+            sym.name = symbol_name;
+            sym.type = ElementType::TOKEN; // 操作符通常是终结符
+            sym.precedence = current_precedence;
+            sym.assoc = assoc;
+            if (!type_name.empty()) {
+                sym.value_type = type_name;
+            }
+
+            // 添加到符号表
+            symbol_table[symbol_name] = sym;
+
+            // 添加到优先级映射表
+            precedence_map[current_precedence].insert(symbol_name);
+        }
+    }
 }
 
 bool YaccParser::parseRulesSection(std::ifstream& file)
@@ -491,14 +688,113 @@ void YaccParser::printParsedInfo() const
 {
     std::cout << "起始符号: " << start_symbol << std::endl;
 
+    // 改进 Tokens 输出格式
     std::cout << "\nTokens (" << tokens.size() << "):" << std::endl;
     for (const auto& token : tokens) {
-        std::cout << token.name << " ";
+        std::cout << "  " << token.name;
+        if (!token.value_type.empty()) {
+            std::cout << " <" << token.value_type << ">";
+        }
+
+        // 添加优先级信息
+        if (token.precedence > 0) {
+            std::cout << " [优先级:" << token.precedence;
+
+            // 添加结合性信息
+            switch (token.assoc) {
+            case Associativity::LEFT:
+                std::cout << ", 左结合";
+                break;
+            case Associativity::RIGHT:
+                std::cout << ", 右结合";
+                break;
+            case Associativity::NONASSOC:
+                std::cout << ", 无结合";
+                break;
+            default:
+                break;
+            }
+            std::cout << "]";
+        }
+
+        std::cout << std::endl;
+    }
+
+    // 输出所有非终结符及其类型
+    std::cout << "\n非终结符:" << std::endl;
+    std::set<std::string> printed_non_terminals;
+
+    // 首先添加起始符号
+    if (!start_symbol.empty()) {
+        printed_non_terminals.insert(start_symbol);
+        std::cout << "  " << start_symbol;
+        if (type_map.find(start_symbol) != type_map.end()) {
+            std::cout << " <" << type_map.at(start_symbol) << ">";
+        }
+        std::cout << std::endl;
+    }
+
+    // 添加其他非终结符
+    for (const auto& prod : productions) {
+        if (printed_non_terminals.find(prod.left.name) == printed_non_terminals.end()) {
+            printed_non_terminals.insert(prod.left.name);
+            std::cout << "  " << prod.left.name;
+            if (!prod.left.value_type.empty()) {
+                std::cout << " <" << prod.left.value_type << ">";
+            } else if (type_map.find(prod.left.name) != type_map.end()) {
+                std::cout << " <" << type_map.at(prod.left.name) << ">";
+            }
+            std::cout << std::endl;
+        }
+    }
+
+    // 改进优先级和结合性信息输出
+    std::cout << "\n优先级和结合性信息:" << std::endl;
+    for (const auto& [prec, symbols] : precedence_map) {
+        std::cout << "  优先级 " << prec << ": ";
+
+        // 找出该优先级的结合性
+        Associativity assoc = Associativity::NONE;
+        std::string assoc_str = "无";
+
+        if (!symbols.empty()) {
+            const std::string& first_symbol = *symbols.begin();
+            if (symbol_table.find(first_symbol) != symbol_table.end()) {
+                assoc = symbol_table.at(first_symbol).assoc;
+                switch (assoc) {
+                case Associativity::LEFT:
+                    assoc_str = "左";
+                    break;
+                case Associativity::RIGHT:
+                    assoc_str = "右";
+                    break;
+                case Associativity::NONASSOC:
+                    assoc_str = "无";
+                    break;
+                default:
+                    assoc_str = "未知";
+                }
+            }
+        }
+
+        std::cout << "[" << assoc_str << "结合] ";
+
+        // 输出符号
+        for (const auto& symbol : symbols) {
+            std::cout << symbol << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    // 输出union定义
+    if (!union_code.empty()) {
+        std::cout << "\n\nUnion 定义:\n"
+                  << union_code << std::endl;
     }
 
     if (!declaration_code.empty()) {
         std::cout << "\n\n声明代码块:\n"
-                  << declaration_code;
+                  << declaration_code << std::endl;
     }
 
     std::cout << "\n\n产生式规则 (" << productions.size() << "):" << std::endl;
@@ -516,6 +812,11 @@ void YaccParser::printParsedInfo() const
             std::cout << "LIT";
             break;
         }
+
+        // 添加类型信息
+        if (!prod.left.value_type.empty()) {
+            std::cout << ", " << prod.left.value_type;
+        }
         std::cout << "] -> ";
 
         for (const auto& sym : prod.right) {
@@ -530,6 +831,11 @@ void YaccParser::printParsedInfo() const
             case ElementType::LITERAL:
                 std::cout << "LIT";
                 break;
+            }
+
+            // 添加类型信息
+            if (!sym.value_type.empty()) {
+                std::cout << ", " << sym.value_type;
             }
             std::cout << "] ";
         }

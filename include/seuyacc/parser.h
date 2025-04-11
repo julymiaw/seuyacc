@@ -3,6 +3,8 @@
 
 #include "production.h"
 #include "symbol.h"
+#include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,8 +18,17 @@ public:
     // 存储token声明
     std::vector<Symbol> tokens;
 
-    // 存储词法单元映射
+    // 存储符号映射 (符号名 -> 符号对象)
+    std::unordered_map<std::string, Symbol> symbol_table;
+
+    // 存储token映射 (token名 -> 索引)
     std::unordered_map<std::string, int> token_map;
+
+    // 存储类型映射 (符号名 -> 类型名)
+    std::unordered_map<std::string, std::string> type_map;
+
+    // 储存优先级信息 (优先级 -> 符号集合)
+    std::map<int, std::set<std::string>> precedence_map;
 
     // 存储语法规则
     std::vector<Production> productions;
@@ -28,8 +39,14 @@ public:
     // 声明部分的代码块
     std::string declaration_code;
 
+    // union 代码块
+    std::string union_code;
+
     // 程序部分的代码
     std::string program_code;
+
+    // 当前最大优先级
+    int current_precedence;
 
     // 解析Yacc文件的方法
     bool parseYaccFile(const std::string& filename);
@@ -42,6 +59,9 @@ private:
     void parseTokenSection(const std::string& line);
     void parseStartSymbol(const std::string& line);
     bool parseDeclarationCode(std::ifstream& file);
+    bool parseUnionCode(std::string& buffer, size_t& pos);
+    void parseTypeDeclaration(const std::string& line);
+    void parseAssociativity(const std::string& line, Associativity assoc);
 
     // 规则部分按字符处理的函数
     bool parseRulesSection(std::ifstream& file);

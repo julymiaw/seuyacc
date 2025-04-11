@@ -13,10 +13,38 @@ enum class ElementType {
     LITERAL
 };
 
+// 枚举表示运算符的结合性
+enum class Associativity {
+    NONE,
+    LEFT,
+    RIGHT,
+    NONASSOC
+};
+
 // 语法符号 - 可以是终结符、非终结符、操作符等
 struct Symbol {
     std::string name;
     ElementType type;
+    std::string value_type; // 符号值的类型（来自%type或%token<type>）
+    int precedence; // 优先级，数字越大优先级越高
+    Associativity assoc; // 结合性
+
+    // 构造函数，设置默认值
+    Symbol()
+        : type(ElementType::TOKEN)
+        , precedence(0)
+        , assoc(Associativity::NONE)
+    {
+    }
+
+    // 兼容旧代码的构造函数
+    Symbol(const std::string& n, ElementType t)
+        : name(n)
+        , type(t)
+        , precedence(0)
+        , assoc(Associativity::NONE)
+    {
+    }
 
     // 添加比较运算符
     bool operator==(const Symbol& other) const
