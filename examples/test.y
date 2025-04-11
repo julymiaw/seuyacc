@@ -22,7 +22,8 @@ typedef enum {
     AST_BINARY_EXPR,
     AST_ASSIGN_EXPR,
     AST_ID,
-    AST_INT_LITERAL
+    AST_INT_LITERAL,
+    AST_STRING_LITERAL
 } NodeType;
 
 /* 抽象语法树节点 */
@@ -33,6 +34,11 @@ typedef struct ASTNode {
     struct ASTNode* sibling;  /* 兄弟节点 */
 } ASTNode;
 
+/* 函数原型声明 */
+int print_ast_dot_node(ASTNode* node, FILE* dot_file, int* next_id, int parent_id);
+char* escape_string(const char* str);
+void print_ast_dot(ASTNode* node);
+
 /* 全局变量 */
 ASTNode* ast_root = NULL;
 int node_count = 0;
@@ -40,6 +46,10 @@ int node_count = 0;
 /* 创建新节点 */
 ASTNode* create_node(NodeType type, char* value) {
     ASTNode* node = (ASTNode*)malloc(sizeof(ASTNode));
+    if (!node) {
+        fprintf(stderr, "内存分配失败\n");
+        exit(1);
+    }
     node->type = type;
     node->value = value ? strdup(value) : NULL;
     node->child = NULL;
@@ -84,31 +94,106 @@ const char* node_type_str(NodeType type) {
         case AST_ASSIGN_EXPR: return "AssignmentExpression";
         case AST_ID: return "Identifier";
         case AST_INT_LITERAL: return "IntegerLiteral";
+        case AST_STRING_LITERAL: return "StringLiteral";
         default: return "Unknown";
     }
 }
 
 /* 打印抽象语法树 */
-void print_ast(ASTNode* node, int indent) {
-    if (!node) return;
+void print_ast_dot(ASTNode* node) {
+    static int node_id = 0;
+    int current_node_id;
+    FILE* dot_file = fopen("ast.dot", "w");
     
-    /* 打印缩进 */
-    for (int i = 0; i < indent; i++) {
-        printf("  ");
+    if (!dot_file) {
+        fprintf(stderr, "无法创建 DOT 文件\n");
+        return;
     }
     
-    /* 打印节点信息 */
-    printf("%s", node_type_str(node->type));
+    /* 写入 DOT 文件头部 */
+    fprintf(dot_file, "digraph AST {\n");
+    fprintf(dot_file, "  node [shape=box, fontname=\"SimSun\", fontsize=12];\n");
+    fprintf(dot_file, "  edge [fontname=\"SimSun\", fontsize=10];\n\n");
+    
+    /* 重置节点ID计数器 */
+    node_id = 0;
+    
+    /* 递归生成节点和边 */
+    print_ast_dot_node(node, dot_file, &node_id, -1);
+    
+    /* 写入 DOT 文件结尾 */
+    fprintf(dot_file, "}\n");
+    fclose(dot_file);
+    
+    printf("\n抽象语法树已保存为 'ast.dot'\n");
+    printf("可以使用 Graphviz 工具将其转换为图像: dot -Tpng ast.dot -o ast.png\n");
+}
+
+/* 递归生成 DOT 格式的节点和边 */
+int print_ast_dot_node(ASTNode* node, FILE* dot_file, int* next_id, int parent_id) {
+    if (!node) return -1;
+    
+    int current_id = (*next_id)++;
+    
+    /* 生成当前节点 */
+    fprintf(dot_file, "  node%d [label=\"%s", current_id, node_type_str(node->type));
     if (node->value) {
-        printf(" (%s)", node->value);
+        /* 转义双引号以避免 DOT 格式错误 */
+        char* escaped_value = escape_string(node->value);
+        fprintf(dot_file, "\\n(%s)", escaped_value);
+        free(escaped_value);
     }
-    printf("\n");
+    fprintf(dot_file, "\"];\n");
     
-    /* 递归打印子节点 */
-    print_ast(node->child, indent + 1);
+    /* 如果有父节点，添加一条边 */
+    if (parent_id >= 0) {
+        fprintf(dot_file, "  node%d -> node%d;\n", parent_id, current_id);
+    }
     
-    /* 递归打印兄弟节点 */
-    print_ast(node->sibling, indent);
+    /* 处理子节点 */
+    if (node->child) {
+        print_ast_dot_node(node->child, dot_file, next_id, current_id);
+    }
+    
+    /* 处理兄弟节点 */
+    if (node->sibling) {
+        print_ast_dot_node(node->sibling, dot_file, next_id, parent_id);
+    }
+    
+    return current_id;
+}
+
+/* 转义字符串中的特殊字符 */
+char* escape_string(const char* str) {
+    if (!str) return NULL;
+    
+    int len = strlen(str);
+    /* 分配足够的空间容纳转义后的字符串（最坏情况下每个字符都需要转义） */
+    char* escaped = (char*)malloc(len * 2 + 1);
+    
+    int i, j = 0;
+    for (i = 0; i < len; i++) {
+        switch (str[i]) {
+            case '\"':
+                escaped[j++] = '\\';
+                escaped[j++] = '"';
+                break;
+            case '\\':
+                escaped[j++] = '\\';
+                escaped[j++] = '\\';
+                break;
+            case '\n':
+                escaped[j++] = '\\';
+                escaped[j++] = 'n';
+                break;
+            default:
+                escaped[j++] = str[i];
+                break;
+        }
+    }
+    escaped[j] = '\0';
+    
+    return escaped;
 }
 
 /* 释放抽象语法树内存 */
@@ -131,12 +216,33 @@ void free_ast(ASTNode* node) {
     }
     free(node);
 }
+
+/* 前向声明以避免警告 */
+int yylex();
+void yyerror(const char *s);
 %}
 
-%token INTEGER_LITERAL
-%token IDENTIFIER STRING_LITERAL
+%union {
+    int ival;
+    char* sval;
+    struct ASTNode* node;
+}
+
+/* 定义各个终结符和非终结符的类型 */
+%token <ival> INTEGER_LITERAL
+%token <sval> IDENTIFIER STRING_LITERAL
 %token INT CHAR VOID MAIN PRINTF RETURN
 %token ADD SUB MUL DIV ASSIGN SEMICOLON LPAREN RPAREN LBRACE RBRACE COMMA
+
+/* 定义各非终结符的类型 */
+%type <node> program main_function type_specifier compound_statement
+%type <node> opt_declaration_list opt_statement_list declaration_list declaration
+%type <node> init_declarator_list init_declarator initializer statement_list statement
+%type <node> expression_statement printf_statement return_statement expression
+
+%left ASSIGN  /* 最低优先级 */
+%left ADD SUB
+%left MUL DIV  /* 最高优先级 */
 
 %start program
 
@@ -229,11 +335,11 @@ init_declarator_list
 init_declarator
     : IDENTIFIER {
         $$ = create_node(AST_INIT, NULL);
-        add_child($$, create_node(AST_ID, "identifier"));
+        add_child($$, create_node(AST_ID, $1));
     }
     | IDENTIFIER ASSIGN initializer {
         $$ = create_node(AST_INIT, NULL);
-        add_child($$, create_node(AST_ID, "identifier"));
+        add_child($$, create_node(AST_ID, $1));
         add_child($$, $3);
     }
     ;
@@ -287,12 +393,12 @@ expression_statement
 printf_statement
     : PRINTF LPAREN STRING_LITERAL COMMA expression RPAREN SEMICOLON {
         $$ = create_node(AST_PRINTF_STMT, NULL);
-        add_child($$, create_node(AST_STRING_LITERAL, "string"));
+        add_child($$, create_node(AST_STRING_LITERAL, $3));
         add_child($$, $5);
     }
     | PRINTF LPAREN STRING_LITERAL RPAREN SEMICOLON {
         $$ = create_node(AST_PRINTF_STMT, NULL);
-        add_child($$, create_node(AST_STRING_LITERAL, "string"));
+        add_child($$, create_node(AST_STRING_LITERAL, $3));
     }
     ;
 
@@ -309,11 +415,13 @@ return_statement
 expression
     : IDENTIFIER {
         $$ = create_node(AST_EXPR, NULL);
-        add_child($$, create_node(AST_ID, "identifier"));
+        add_child($$, create_node(AST_ID, $1));
     }
     | INTEGER_LITERAL {
+        char buffer[32];
+        sprintf(buffer, "%d", $1);
         $$ = create_node(AST_EXPR, NULL);
-        add_child($$, create_node(AST_INT_LITERAL, "integer"));
+        add_child($$, create_node(AST_INT_LITERAL, buffer));
     }
     | expression ADD expression {
         $$ = create_node(AST_EXPR, NULL);
@@ -346,7 +454,7 @@ expression
     | IDENTIFIER ASSIGN expression {
         $$ = create_node(AST_EXPR, NULL);
         ASTNode* assign = create_node(AST_ASSIGN_EXPR, "=");
-        add_child(assign, create_node(AST_ID, "identifier"));
+        add_child(assign, create_node(AST_ID, $1));
         add_child(assign, $3);
         add_child($$, assign);
     }
@@ -356,23 +464,23 @@ expression
     ;
 
 %%
-#include <stdio.h>
 
-extern char yytext[];
-extern int column;
+extern int yylex();
+extern int line_number;
+extern char* yytext;
 
-void yyerror(char const *s)
+void yyerror(const char *s)
 {
     fflush(stdout);
-    printf("\n%*s\n%*s\n", column, "^", column, s);
+    fprintf(stderr, "错误 (行 %d): %s\n", line_number, s);
 }
 
 int main() {
     yyparse();
     
     if (ast_root) {
-        printf("\n=== Abstract Syntax Tree ===\n");
-        print_ast(ast_root, 0);
+        printf("\n=== 生成抽象语法树 ===\n");
+        print_ast_dot(ast_root);
         printf("\nTotal nodes: %d\n", node_count);
         free_ast(ast_root);
     }
