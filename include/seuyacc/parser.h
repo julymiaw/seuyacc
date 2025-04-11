@@ -25,6 +25,12 @@ public:
     // 起始符号
     std::string start_symbol;
 
+    // 声明部分的代码块
+    std::string declaration_code;
+
+    // 程序部分的代码
+    std::string program_code;
+
     // 解析Yacc文件的方法
     bool parseYaccFile(const std::string& filename);
 
@@ -35,6 +41,7 @@ private:
     // 定义部分处理函数
     void parseTokenSection(const std::string& line);
     void parseStartSymbol(const std::string& line);
+    bool parseDeclarationCode(std::ifstream& file);
 
     // 规则部分按字符处理的函数
     bool parseRulesSection(std::ifstream& file);
@@ -44,6 +51,9 @@ private:
     bool parseProduction(std::string& buffer, size_t& pos, const std::string& rule_name);
     bool parseSymbol(std::string& buffer, size_t& pos, Symbol& symbol);
     bool parseSemanticAction(std::string& buffer, size_t& pos, std::string& action);
+
+    // 程序部分处理函数
+    bool parseProgramSection(std::ifstream& file);
 
     // 辅助函数
     void skipWhitespaceAndComments(std::string& buffer, size_t& pos);

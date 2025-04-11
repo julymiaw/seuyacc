@@ -21,15 +21,23 @@ bool YaccParser::parseYaccFile(const std::string& filename)
     bool in_code = false;
 
     while (std::getline(file, line)) {
-        // 去除注释和尾部空白
-        line = std::regex_replace(line, std::regex("//.*$"), "");
-        line = std::regex_replace(line, std::regex("^\\s+|\\s+$"), "");
+        // 检查是否为代码块开始
+        if (line == "%{" && in_definitions) {
+            if (!parseDeclarationCode(file)) {
+                return false;
+            }
+            continue;
+        }
 
-        if (line.empty())
+        // 去除注释和尾部空白
+        std::string cleaned_line = std::regex_replace(line, std::regex("//.*$"), "");
+        cleaned_line = std::regex_replace(cleaned_line, std::regex("^\\s+|\\s+$"), "");
+
+        if (cleaned_line.empty())
             continue;
 
         // 识别各个section
-        if (line == "%%") {
+        if (cleaned_line == "%%") {
             if (in_definitions) {
                 in_definitions = false;
                 in_rules = true;
@@ -42,23 +50,23 @@ bool YaccParser::parseYaccFile(const std::string& filename)
                 // parseRulesSection 已经处理到了第二个 %% 或文件末尾
                 in_rules = false;
                 in_code = true;
-            } else if (in_rules) {
-                // 这种情况不应该发生，因为 parseRulesSection 已经处理了第二个 %%
-                in_rules = false;
-                in_code = true;
+
+                // 处理程序部分
+                if (!parseProgramSection(file)) {
+                    return false;
+                }
             }
             continue;
         }
 
         if (in_definitions) {
             // 处理定义部分
-            if (line.substr(0, 6) == "%token") {
-                parseTokenSection(line);
-            } else if (line.substr(0, 6) == "%start") {
-                parseStartSymbol(line);
+            if (cleaned_line.substr(0, 6) == "%token") {
+                parseTokenSection(cleaned_line);
+            } else if (cleaned_line.substr(0, 6) == "%start") {
+                parseStartSymbol(cleaned_line);
             }
         }
-        // 忽略code部分
     }
 
     // 验证非终结符
@@ -96,6 +104,21 @@ void YaccParser::parseStartSymbol(const std::string& line)
     }
 }
 
+bool YaccParser::parseDeclarationCode(std::ifstream& file)
+{
+    std::string line;
+
+    while (std::getline(file, line)) {
+        if (line == "%}") {
+            return true;
+        }
+        declaration_code += line + "\n";
+    }
+
+    std::cerr << "错误: 未找到代码块结束标记 %}" << std::endl;
+    return false;
+}
+
 bool YaccParser::parseRulesSection(std::ifstream& file)
 {
     // 读取整个规则部分到一个字符串缓冲区
@@ -123,7 +146,7 @@ bool YaccParser::parseRulesSection(std::ifstream& file)
         skipWhitespaceAndComments(buffer, pos);
     }
 
-    return true;
+    return found_end;
 }
 
 bool YaccParser::parseRule(std::string& buffer, size_t& pos)
@@ -215,6 +238,16 @@ bool YaccParser::parseProduction(std::string& buffer, size_t& pos, const std::st
     left_sym.name = rule_name;
     left_sym.type = ElementType::NON_TERMINAL;
     prod.left = left_sym;
+
+    // 跳过空白和注释
+    skipWhitespaceAndComments(buffer, pos);
+
+    // 检查是否是空产生式 - 直接遇到分号或竖线
+    if (pos < buffer.size() && (buffer[pos] == ';' || buffer[pos] == '|')) {
+        // 这是一个空产生式，right 部分为空
+        productions.push_back(prod);
+        return true;
+    }
 
     // 解析产生式右部
     while (pos < buffer.size()) {
@@ -382,6 +415,18 @@ bool YaccParser::parseSemanticAction(std::string& buffer, size_t& pos, std::stri
     return false;
 }
 
+bool YaccParser::parseProgramSection(std::ifstream& file)
+{
+    program_code.clear();
+    std::string line;
+
+    while (std::getline(file, line)) {
+        program_code += line + "\n";
+    }
+
+    return true;
+}
+
 void YaccParser::skipWhitespaceAndComments(std::string& buffer, size_t& pos)
 {
     while (pos < buffer.size()) {
@@ -390,19 +435,33 @@ void YaccParser::skipWhitespaceAndComments(std::string& buffer, size_t& pos)
             pos++;
         }
 
-        // 如果遇到注释
+        // 如果遇到行注释
         if (pos + 1 < buffer.size() && buffer[pos] == '/' && buffer[pos + 1] == '/') {
             // 跳到行尾
             pos += 2;
             while (pos < buffer.size() && buffer[pos] != '\n') {
                 pos++;
             }
-            if (pos < buffer.size())
+            if (pos < buffer.size()) {
                 pos++; // 跳过换行符
+            }
             continue;
         }
 
-        break;
+        // 如果遇到块注释
+        if (pos + 1 < buffer.size() && buffer[pos] == '/' && buffer[pos + 1] == '*') {
+            // 跳到块注释结束
+            pos += 2; // 跳过 /*
+            while (pos + 1 < buffer.size() && !(buffer[pos] == '*' && buffer[pos + 1] == '/')) {
+                pos++;
+            }
+            if (pos + 1 < buffer.size()) {
+                pos += 2; // 跳过 */
+            }
+            continue;
+        }
+
+        break; // 如果没有更多的空白或注释，退出循环
     }
 }
 
@@ -435,6 +494,11 @@ void YaccParser::printParsedInfo() const
     std::cout << "\nTokens (" << tokens.size() << "):" << std::endl;
     for (const auto& token : tokens) {
         std::cout << token.name << " ";
+    }
+
+    if (!declaration_code.empty()) {
+        std::cout << "\n\n声明代码块:\n"
+                  << declaration_code;
     }
 
     std::cout << "\n\n产生式规则 (" << productions.size() << "):" << std::endl;
@@ -475,6 +539,11 @@ void YaccParser::printParsedInfo() const
         }
 
         std::cout << std::endl;
+    }
+
+    if (!program_code.empty()) {
+        std::cout << "\n\n程序代码:\n"
+                  << program_code;
     }
 }
 
