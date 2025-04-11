@@ -320,24 +320,46 @@ bool YaccParser::parseSemanticAction(std::string& buffer, size_t& pos, std::stri
     int brace_count = 1;
     pos++; // 跳过开始的 {
 
-    bool in_single_quote = false;
-    bool in_double_quote = false;
-    bool escaped = false;
+    char quote_type = 0; // 0表示不在引号内，'\''表示单引号，'\"'表示双引号
+    bool escaped = false; // 是否为转义字符
+    bool in_line_comment = false; // 是否在行注释中
+    bool in_block_comment = false; // 是否在块注释中
 
     while (pos < buffer.size()) {
         char c = buffer[pos];
+        char next_c = (pos + 1 < buffer.size()) ? buffer[pos + 1] : '\0';
 
-        // 处理引号
-        if (!escaped) {
-            if (c == '\'')
-                in_single_quote = !in_single_quote;
-            else if (c == '\"')
-                in_double_quote = !in_double_quote;
-        }
-
-        // 处理花括号
-        if (!in_single_quote && !in_double_quote && !escaped) {
-            if (c == '{') {
+        if (escaped) {
+            // 如果是转义字符，下一个字符不做特殊处理
+            escaped = false;
+        } else if (c == '\\' && !in_line_comment && !in_block_comment) {
+            // 标记转义字符（仅当不在注释中时）
+            escaped = true;
+        } else if (in_line_comment) {
+            // 在行注释中，遇到换行符则结束注释
+            if (c == '\n') {
+                in_line_comment = false;
+            }
+        } else if (in_block_comment) {
+            // 在块注释中，检查是否结束块注释
+            if (c == '*' && next_c == '/') {
+                in_block_comment = false;
+                pos++; // 跳过 '/'
+            }
+        } else if (quote_type == 0 && c == '/' && next_c == '/') {
+            // 不在引号内，开始行注释
+            in_line_comment = true;
+            pos++; // 跳过第二个 '/'
+        } else if (quote_type == 0 && c == '/' && next_c == '*') {
+            // 不在引号内，开始块注释
+            in_block_comment = true;
+            pos++; // 跳过 '*'
+        } else if (quote_type == 0 && !in_line_comment && !in_block_comment) {
+            // 不在引号或注释内时，检查是否遇到引号或花括号
+            if (c == '\'' || c == '\"') {
+                // 记录当前引号类型
+                quote_type = c;
+            } else if (c == '{') {
                 brace_count++;
             } else if (c == '}') {
                 brace_count--;
@@ -348,13 +370,9 @@ bool YaccParser::parseSemanticAction(std::string& buffer, size_t& pos, std::stri
                     return true;
                 }
             }
-        }
-
-        // 处理转义字符
-        if (c == '\\') {
-            escaped = !escaped;
-        } else {
-            escaped = false;
+        } else if (!in_line_comment && !in_block_comment && c == quote_type) {
+            // 如果不在注释中且遇到与当前引号类型相同的字符，结束引号状态
+            quote_type = 0;
         }
 
         pos++;
