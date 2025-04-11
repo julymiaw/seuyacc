@@ -1,4 +1,5 @@
 #include "seuyacc/lr_generator.h"
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 
@@ -568,5 +569,231 @@ std::string LRGenerator::toPlantUML() const
 
     ss << "@enduml\n";
     return ss.str();
+}
+
+// 获取所有终结符（按名称排序）
+std::vector<Symbol> LRGenerator::getSortedTerminals() const
+{
+    std::vector<Symbol> terminals;
+
+    // 收集所有终结符，包括EOF符号$
+    Symbol endSymbol = { "$", ElementType::TOKEN };
+    terminals.push_back(endSymbol);
+
+    for (const auto& [name, symbol] : parser.symbol_table) {
+        if (symbol.type == ElementType::TOKEN && name != "$" && name != "ε") {
+            terminals.push_back(symbol);
+        }
+    }
+
+    // 按名称排序
+    std::sort(terminals.begin(), terminals.end(), [](const Symbol& a, const Symbol& b) {
+        return a.name < b.name;
+    });
+
+    return terminals;
+}
+
+// 获取所有非终结符（按名称排序）
+std::vector<Symbol> LRGenerator::getSortedNonTerminals() const
+{
+    std::vector<Symbol> nonTerminals;
+
+    for (const auto& [name, symbol] : parser.symbol_table) {
+        if (symbol.type == ElementType::NON_TERMINAL && name != "S'") {
+            nonTerminals.push_back(symbol);
+        }
+    }
+
+    // 按名称排序
+    std::sort(nonTerminals.begin(), nonTerminals.end(), [](const Symbol& a, const Symbol& b) {
+        return a.name < b.name;
+    });
+
+    return nonTerminals;
+}
+
+// 将ActionEntry转换为可读字符串
+std::string LRGenerator::actionEntryToString(const ActionEntry& entry) const
+{
+    switch (entry.type) {
+    case ActionType::SHIFT:
+        return "s" + std::to_string(entry.value);
+    case ActionType::REDUCE:
+        return "r" + std::to_string(entry.value);
+    case ActionType::ACCEPT:
+        return "acc";
+    case ActionType::ERROR:
+        return "err";
+    default:
+        return "";
+    }
+}
+
+// 找到产生式的字符串表示
+std::string LRGenerator::getProductionString(int index) const
+{
+    if (index >= 0 && index < parser.productions.size()) {
+        const Production& prod = parser.productions[index];
+        std::stringstream ss;
+
+        ss << prod.left.name << " -> ";
+
+        if (prod.right.empty()) {
+            ss << "ε";
+        } else {
+            for (const auto& symbol : prod.right) {
+                ss << symbol.name << " ";
+            }
+        }
+
+        return ss.str();
+    }
+
+    return "未知产生式";
+}
+
+/// 将ACTION和GOTO表导出为Markdown格式
+std::string LRGenerator::toMarkdownTable() const
+{
+    std::stringstream ss;
+
+    // 生成标题和基本信息
+    ss << "# LR(1) 分析表\n\n";
+    ss << "## 基本信息\n\n";
+    ss << "- 状态数量: " << canonical_collection.size() << "\n";
+    ss << "- 终结符数量: " << getSortedTerminals().size() - 1 << " (不含 $)\n";
+    ss << "- 非终结符数量: " << getSortedNonTerminals().size() << "\n";
+    ss << "- 产生式数量: " << parser.productions.size() << "\n\n";
+
+    // 列出所有产生式
+    ss << "## 产生式列表\n\n";
+    for (size_t i = 0; i < parser.productions.size(); ++i) {
+        const Production& prod = parser.productions[i];
+        ss << "- (" << i << ") " << prod.left.name << " -> ";
+
+        if (prod.right.empty()) {
+            ss << "ε";
+        } else {
+            for (size_t j = 0; j < prod.right.size(); ++j) {
+                ss << prod.right[j].name;
+                // 只在非最后一个符号后添加空格
+                if (j < prod.right.size() - 1) {
+                    ss << " ";
+                }
+            }
+        }
+
+        // 添加优先级和结合性信息（如果有）
+        if (prod.precedence > 0) {
+            ss << " [优先级: " << prod.precedence << "]";
+        }
+
+        ss << "\n";
+    }
+    ss << "\n";
+
+    // 收集终结符和非终结符
+    std::vector<Symbol> terminals = getSortedTerminals();
+    std::vector<Symbol> nonTerminals = getSortedNonTerminals();
+
+    // 生成ACTION表
+    ss << "## ACTION表\n\n";
+    ss << "| 状态 |";
+
+    // ACTION表头：终结符
+    for (const auto& terminal : terminals) {
+        ss << " " << terminal.name << " |";
+    }
+    ss << "\n| --- |";
+
+    // 表头分隔线
+    for (size_t i = 0; i < terminals.size(); ++i) {
+        ss << " --- |";
+    }
+    ss << "\n";
+
+    // ACTION表内容：每个状态对每个终结符的动作
+    for (int state = 0; state < canonical_collection.size(); ++state) {
+        ss << "| " << state << " |";
+
+        for (const auto& terminal : terminals) {
+            if (action_table.find(state) != action_table.end() && action_table.at(state).find(terminal) != action_table.at(state).end()) {
+                ss << " " << actionEntryToString(action_table.at(state).at(terminal)) << " |";
+            } else {
+                ss << " |";
+            }
+        }
+
+        ss << "\n";
+    }
+    ss << "\n";
+
+    // 生成GOTO表
+    ss << "## GOTO表\n\n";
+    ss << "| 状态 |";
+
+    // GOTO表头：非终结符
+    for (const auto& nonTerminal : nonTerminals) {
+        ss << " " << nonTerminal.name << " |";
+    }
+    ss << "\n| --- |";
+
+    // 表头分隔线
+    for (size_t i = 0; i < nonTerminals.size(); ++i) {
+        ss << " --- |";
+    }
+    ss << "\n";
+
+    // GOTO表内容：每个状态对每个非终结符的转移
+    for (int state = 0; state < canonical_collection.size(); ++state) {
+        ss << "| " << state << " |";
+
+        for (const auto& nonTerminal : nonTerminals) {
+            if (goto_table.find(state) != goto_table.end() && goto_table.at(state).find(nonTerminal) != goto_table.at(state).end()) {
+                ss << " " << goto_table.at(state).at(nonTerminal) << " |";
+            } else {
+                ss << " |";
+            }
+        }
+
+        ss << "\n";
+    }
+    ss << "\n";
+
+    // 添加规约产生式的详细信息
+    ss << "## 规约说明\n\n";
+    ss << "| 规约动作 | 产生式 | 说明 |\n";
+    ss << "| --- | --- | --- |\n";
+    for (size_t i = 0; i < parser.productions.size(); ++i) {
+        const Production& prod = parser.productions[i];
+        ss << "| r" << i << " | " << prod.left.name << " -> ";
+
+        if (prod.right.empty()) {
+            ss << "ε";
+        } else {
+            for (size_t j = 0; j < prod.right.size(); ++j) {
+                ss << prod.right[j].name;
+                // 只在非最后一个符号后添加空格
+                if (j < prod.right.size() - 1) {
+                    ss << " ";
+                }
+            }
+        }
+
+        ss << " | 规约为 " << prod.left.name;
+
+        // 添加语义动作提示（如果有）
+        if (!prod.semantic_action.empty()) {
+            ss << "，执行语义动作";
+        }
+
+        ss << " |\n";
+    }
+
+    // 去除最后一个多余的换行符
+    std::string result = ss.str();
+
+    return result;
 }
 }

@@ -48,7 +48,22 @@ public:
         return goto_table;
     }
 
+    // 将ACTION和GOTO表导出为Markdown格式
+    std::string toMarkdownTable() const;
+
 private:
+    // 辅助方法：将ActionEntry转换为可读字符串
+    std::string actionEntryToString(const ActionEntry& entry) const;
+
+    // 辅助方法：获取所有终结符（按名称排序）
+    std::vector<Symbol> getSortedTerminals() const;
+
+    // 辅助方法：获取所有非终结符（按名称排序）
+    std::vector<Symbol> getSortedNonTerminals() const;
+
+    // 辅助方法：找到产生式的字符串表示
+    std::string getProductionString(int index) const;
+
     // 计算文法符号的FIRST集
     std::unordered_set<Symbol, SymbolHasher> computeFirst(const Symbol& symbol);
     std::unordered_set<Symbol, SymbolHasher> computeFirstOfSequence(const std::vector<Symbol>& sequence);
