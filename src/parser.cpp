@@ -6,6 +6,7 @@
 #include <sstream>
 
 namespace seuyacc {
+
 bool YaccParser::parseYaccFile(const std::string& filename)
 {
     std::ifstream file(filename);
@@ -18,9 +19,6 @@ bool YaccParser::parseYaccFile(const std::string& filename)
     bool in_definitions = true;
     bool in_rules = false;
     bool in_code = false;
-
-    current_rule_name = "";
-    parser_state = ParserState::EXPECTING_RULE_NAME;
 
     while (std::getline(file, line)) {
         // 去除注释和尾部空白
@@ -35,7 +33,17 @@ bool YaccParser::parseYaccFile(const std::string& filename)
             if (in_definitions) {
                 in_definitions = false;
                 in_rules = true;
+
+                // 当进入规则部分时，切换到按字符处理的模式
+                if (!parseRulesSection(file)) {
+                    return false;
+                }
+
+                // parseRulesSection 已经处理到了第二个 %% 或文件末尾
+                in_rules = false;
+                in_code = true;
             } else if (in_rules) {
+                // 这种情况不应该发生，因为 parseRulesSection 已经处理了第二个 %%
                 in_rules = false;
                 in_code = true;
             }
@@ -49,12 +57,11 @@ bool YaccParser::parseYaccFile(const std::string& filename)
             } else if (line.substr(0, 6) == "%start") {
                 parseStartSymbol(line);
             }
-        } else if (in_rules) {
-            // 处理语法规则部分
-            parseGrammarRules(line);
         }
         // 忽略code部分
     }
+
+    // 验证非终结符
     validateNonTerminals();
     return true;
 }
@@ -89,210 +96,301 @@ void YaccParser::parseStartSymbol(const std::string& line)
     }
 }
 
-void YaccParser::parseGrammarRules(const std::string& line)
+bool YaccParser::parseRulesSection(std::ifstream& file)
 {
-    // 检查规则结束标志
-    bool has_semicolon = (line.find(';') != std::string::npos);
+    // 读取整个规则部分到一个字符串缓冲区
+    std::string buffer;
+    std::string line;
+    bool found_end = false;
 
-    // 状态机解析
-    switch (parser_state) {
-    case ParserState::EXPECTING_RULE_NAME:
-        // 规则名可能是单独的标识符
-        if (std::regex_match(line, std::regex("^(\\w+)$"))) {
-            current_rule_name = line;
-            non_terminals.insert(current_rule_name);
-            parser_state = ParserState::EXPECTING_COLON;
-        }
-        // 规则名可能直接接冒号
-        else if (std::regex_match(line, std::regex("^(\\w+)\\s*:"))) {
-            std::string rule_part = line.substr(0, line.find(':'));
-            current_rule_name = std::regex_replace(rule_part, std::regex("\\s+"), "");
-            non_terminals.insert(current_rule_name);
-
-            // 提取冒号后面的产生式
-            std::string production = line.substr(line.find(':') + 1);
-            processProductionPart(production);
-
-            parser_state = ParserState::IN_PRODUCTION;
-            if (has_semicolon) {
-                parser_state = ParserState::EXPECTING_RULE_NAME;
-            }
-        }
-        break;
-
-    case ParserState::EXPECTING_COLON:
-        // 以冒号开头的行，表示产生式开始
-        if (line[0] == ':') {
-            std::string production = line.substr(1); // 跳过冒号
-            processProductionPart(production);
-            parser_state = ParserState::IN_PRODUCTION;
-
-            if (has_semicolon) {
-                parser_state = ParserState::EXPECTING_RULE_NAME;
-            }
-        }
-        // 冒号可能在行中间而不是开头
-        else if (line.find(':') != std::string::npos) {
-            // 提取冒号后面的产生式
-            std::string production = line.substr(line.find(':') + 1);
-            processProductionPart(production);
-
-            parser_state = ParserState::IN_PRODUCTION;
-            if (has_semicolon) {
-                parser_state = ParserState::EXPECTING_RULE_NAME;
-            }
-        }
-        break;
-
-    case ParserState::IN_PRODUCTION:
-        // 处理继续的产生式（以|开头）
-        if (line[0] == '|') {
-            std::string production = line.substr(1); // 跳过|
-            processProductionPart(production);
-        }
-        // 或者处理任何不以|开头但是属于当前规则的行
-        else {
-            processProductionPart(line);
-        }
-
-        if (has_semicolon) {
-            parser_state = ParserState::EXPECTING_RULE_NAME;
-        }
-        break;
-
-    case ParserState::END_OF_RULE:
-        // 规则结束，期待新规则
-        parser_state = ParserState::EXPECTING_RULE_NAME;
-        // 递归调用以处理可能的新规则
-        parseGrammarRules(line);
-        break;
-    }
-}
-
-void YaccParser::processProductionPart(const std::string& part)
-{
-    std::string cleaned = part;
-
-    // 移除开头和结尾的分隔符
-    cleaned = std::regex_replace(cleaned, std::regex("^\\s*\\|"), "");
-
-    // 处理分号 - 实现智能检测，跳过引号中的分号
-    bool in_single_quote = false;
-    size_t semicolon_pos = std::string::npos;
-
-    for (size_t i = 0; i < cleaned.length(); i++) {
-        char c = cleaned[i];
-
-        // 处理引号开关状态
-        if (c == '\'') {
-            in_single_quote = !in_single_quote;
-        }
-        // 只检测不在引号内的分号
-        else if (c == ';' && !in_single_quote) {
-            semicolon_pos = i;
+    while (std::getline(file, line)) {
+        // 检查是否到达规则部分的结束
+        if (line == "%%") {
+            found_end = true;
             break;
         }
+        buffer += line + "\n";
     }
 
-    // 如果找到非引号内的分号，则截取分号前的部分
-    if (semicolon_pos != std::string::npos) {
-        cleaned = cleaned.substr(0, semicolon_pos);
+    // 解析整个规则部分
+    size_t pos = 0;
+    skipWhitespaceAndComments(buffer, pos);
+
+    while (pos < buffer.size()) {
+        if (!parseRule(buffer, pos)) {
+            return false;
+        }
+        skipWhitespaceAndComments(buffer, pos);
     }
 
-    cleaned = std::regex_replace(cleaned, std::regex("^\\s+|\\s+$"), "");
-
-    // 如果为空，不处理
-    if (cleaned.empty()) {
-        return;
-    }
-
-    // 创建新产生式
-    Production prod;
-
-    // 设置左部为Symbol对象
-    Symbol left_sym;
-    left_sym.name = current_rule_name;
-    left_sym.type = ElementType::NON_TERMINAL; // 左部总是非终结符
-    prod.left = left_sym;
-
-    parseProductionRightSide(cleaned, prod);
-    productions.push_back(prod);
+    return true;
 }
 
-void YaccParser::parseProductionRightSide(const std::string& right_side,
-    Production& prod)
+bool YaccParser::parseRule(std::string& buffer, size_t& pos)
 {
-    std::vector<Symbol> symbols;
-    std::string current_token;
-    bool in_single_quote = false;
+    std::string rule_name;
 
-    for (size_t i = 0; i < right_side.length(); i++) {
-        char c = right_side[i];
+    // 解析规则名
+    if (!parseRuleName(buffer, pos, rule_name)) {
+        return false;
+    }
+
+    // 添加规则名到非终结符集合
+    non_terminals.insert(rule_name);
+
+    // 跳过空白和注释
+    skipWhitespaceAndComments(buffer, pos);
+
+    // 检查冒号
+    if (!checkChar(buffer, pos, ':')) {
+        std::cerr << "错误: 预期找到冒号" << std::endl;
+        return false;
+    }
+    pos++; // 跳过冒号
+
+    // 解析产生式
+    if (!parseProductions(buffer, pos, rule_name)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool YaccParser::parseRuleName(std::string& buffer, size_t& pos, std::string& rule_name)
+{
+    rule_name.clear();
+
+    // 规则名必须是标识符
+    if (pos < buffer.size() && (std::isalpha(buffer[pos]) || buffer[pos] == '_')) {
+        rule_name += buffer[pos++];
+
+        while (pos < buffer.size() && (std::isalnum(buffer[pos]) || buffer[pos] == '_')) {
+            rule_name += buffer[pos++];
+        }
+
+        return true;
+    }
+
+    std::cerr << "错误: 预期找到规则名" << std::endl;
+    return false;
+}
+
+bool YaccParser::parseProductions(std::string& buffer, size_t& pos, const std::string& rule_name)
+{
+    // 解析第一个产生式
+    if (!parseProduction(buffer, pos, rule_name)) {
+        return false;
+    }
+
+    skipWhitespaceAndComments(buffer, pos);
+
+    // 解析可能的后续产生式（由 | 分隔）
+    while (pos < buffer.size() && buffer[pos] == '|') {
+        pos++; // 跳过 |
+        skipWhitespaceAndComments(buffer, pos);
+
+        if (!parseProduction(buffer, pos, rule_name)) {
+            return false;
+        }
+
+        skipWhitespaceAndComments(buffer, pos);
+    }
+
+    // 检查分号
+    if (!checkChar(buffer, pos, ';')) {
+        std::cerr << "错误: 预期找到分号" << std::endl;
+        return false;
+    }
+    pos++; // 跳过分号
+
+    return true;
+}
+
+bool YaccParser::parseProduction(std::string& buffer, size_t& pos, const std::string& rule_name)
+{
+    Production prod;
+
+    // 设置产生式左部
+    Symbol left_sym;
+    left_sym.name = rule_name;
+    left_sym.type = ElementType::NON_TERMINAL;
+    prod.left = left_sym;
+
+    // 解析产生式右部
+    while (pos < buffer.size()) {
+        skipWhitespaceAndComments(buffer, pos);
+
+        // 检查是否到达产生式结束
+        if (pos >= buffer.size() || buffer[pos] == ';' || buffer[pos] == '|') {
+            break;
+        }
+
+        // 检查是否为语义动作
+        if (buffer[pos] == '{') {
+            std::string action;
+            if (!parseSemanticAction(buffer, pos, action)) {
+                return false;
+            }
+            prod.semantic_action = action;
+            // 假设语义动作必须在产生式的最后
+            break;
+        }
+
+        // 解析符号
+        Symbol symbol;
+        if (!parseSymbol(buffer, pos, symbol)) {
+            return false;
+        }
+        prod.right.push_back(symbol);
+    }
+
+    // 添加到产生式列表
+    productions.push_back(prod);
+    return true;
+}
+
+bool YaccParser::parseSymbol(std::string& buffer, size_t& pos, Symbol& symbol)
+{
+    skipWhitespaceAndComments(buffer, pos);
+
+    if (pos >= buffer.size()) {
+        return false;
+    }
+
+    // 检查是否为字面量（单引号包围）
+    if (buffer[pos] == '\'') {
+        size_t start_pos = pos;
+        pos++; // 跳过开始的单引号
+
+        bool escaped = false;
+        while (pos < buffer.size()) {
+            char c = buffer[pos];
+
+            if (c == '\\' && !escaped) {
+                escaped = true;
+            } else if (c == '\'' && !escaped) {
+                // 找到匹配的结束单引号
+                pos++; // 跳过结束单引号
+                symbol.name = buffer.substr(start_pos, pos - start_pos);
+                symbol.type = ElementType::LITERAL;
+                return true;
+            } else {
+                escaped = false;
+            }
+
+            pos++;
+        }
+
+        std::cerr << "错误: 未闭合的字面量" << std::endl;
+        return false;
+    }
+
+    // 解析标识符
+    if (std::isalpha(buffer[pos]) || buffer[pos] == '_') {
+        std::string identifier;
+
+        while (pos < buffer.size() && (std::isalnum(buffer[pos]) || buffer[pos] == '_')) {
+            identifier += buffer[pos++];
+        }
+
+        symbol.name = identifier;
+
+        // 判断符号类型
+        if (token_map.find(identifier) != token_map.end()) {
+            symbol.type = ElementType::TOKEN;
+        } else {
+            symbol.type = ElementType::NON_TERMINAL;
+        }
+
+        return true;
+    }
+
+    std::cerr << "错误: 无效的符号" << std::endl;
+    return false;
+}
+
+bool YaccParser::parseSemanticAction(std::string& buffer, size_t& pos, std::string& action)
+{
+    if (buffer[pos] != '{') {
+        std::cerr << "错误: 语义动作必须以 '{' 开始" << std::endl;
+        return false;
+    }
+
+    size_t start_pos = pos;
+    int brace_count = 1;
+    pos++; // 跳过开始的 {
+
+    bool in_single_quote = false;
+    bool in_double_quote = false;
+    bool escaped = false;
+
+    while (pos < buffer.size()) {
+        char c = buffer[pos];
 
         // 处理引号
-        if (c == '\'') {
-            if (!in_single_quote) {
-                // 开始单引号
-                if (!current_token.empty()) {
-                    Symbol sym;
-                    sym.name = current_token;
-                    if (token_map.find(current_token) != token_map.end()) {
-                        sym.type = ElementType::TOKEN;
-                    } else {
-                        sym.type = ElementType::NON_TERMINAL;
-                    }
-                    symbols.push_back(sym);
-                    current_token.clear();
-                }
-                current_token += c;
-                in_single_quote = true;
-            } else {
-                // 结束单引号
-                current_token += c;
-                Symbol sym;
-                sym.name = current_token;
-                sym.type = ElementType::LITERAL;
-                symbols.push_back(sym);
-                current_token.clear();
-                in_single_quote = false;
-            }
-            continue;
+        if (!escaped) {
+            if (c == '\'')
+                in_single_quote = !in_single_quote;
+            else if (c == '\"')
+                in_double_quote = !in_double_quote;
         }
 
-        // 处理空白字符
-        if (!in_single_quote && std::isspace(c)) {
-            if (!current_token.empty()) {
-                Symbol sym;
-                sym.name = current_token;
-                if (token_map.find(current_token) != token_map.end()) {
-                    sym.type = ElementType::TOKEN;
-                } else {
-                    sym.type = ElementType::NON_TERMINAL;
+        // 处理花括号
+        if (!in_single_quote && !in_double_quote && !escaped) {
+            if (c == '{') {
+                brace_count++;
+            } else if (c == '}') {
+                brace_count--;
+                if (brace_count == 0) {
+                    // 找到匹配的结束花括号
+                    pos++; // 跳过结束花括号
+                    action = buffer.substr(start_pos, pos - start_pos);
+                    return true;
                 }
-                symbols.push_back(sym);
-                current_token.clear();
             }
-            continue;
         }
 
-        // 添加到当前token
-        current_token += c;
-    }
-
-    // 处理最后一个token
-    if (!current_token.empty()) {
-        Symbol sym;
-        sym.name = current_token;
-        assert(!in_single_quote); // 结束时不应在引号内
-        if (token_map.find(current_token) != token_map.end()) {
-            sym.type = ElementType::TOKEN;
+        // 处理转义字符
+        if (c == '\\') {
+            escaped = !escaped;
         } else {
-            sym.type = ElementType::NON_TERMINAL;
+            escaped = false;
         }
-        symbols.push_back(sym);
+
+        pos++;
     }
 
-    prod.right = symbols;
+    std::cerr << "错误: 未闭合的语义动作" << std::endl;
+    return false;
+}
+
+void YaccParser::skipWhitespaceAndComments(std::string& buffer, size_t& pos)
+{
+    while (pos < buffer.size()) {
+        // 跳过空白字符
+        while (pos < buffer.size() && std::isspace(buffer[pos])) {
+            pos++;
+        }
+
+        // 如果遇到注释
+        if (pos + 1 < buffer.size() && buffer[pos] == '/' && buffer[pos + 1] == '/') {
+            // 跳到行尾
+            pos += 2;
+            while (pos < buffer.size() && buffer[pos] != '\n') {
+                pos++;
+            }
+            if (pos < buffer.size())
+                pos++; // 跳过换行符
+            continue;
+        }
+
+        break;
+    }
+}
+
+bool YaccParser::checkChar(std::string& buffer, size_t pos, char expected)
+{
+    return (pos < buffer.size() && buffer[pos] == expected);
 }
 
 void YaccParser::validateNonTerminals()
@@ -353,6 +451,11 @@ void YaccParser::printParsedInfo() const
             }
             std::cout << "] ";
         }
+
+        if (!prod.semantic_action.empty()) {
+            std::cout << prod.semantic_action;
+        }
+
         std::cout << std::endl;
     }
 }

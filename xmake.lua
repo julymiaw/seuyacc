@@ -9,8 +9,13 @@ target("seuyacc")
     after_build(function (target)
         import("core.project.config")
         local outputdir = path.join(config.buildir(), config.plat(), config.arch(), config.mode())
-        os.cp("examples", outputdir)
-        print("Examples directory copied to: " .. outputdir)
+        local targetfile = target:targetfile()
+        
+        -- 获取项目根目录
+        local rootdir = os.projectdir()
+        
+        -- 将编译生成的可执行文件复制到项目根目录
+        os.cp(targetfile, rootdir)
     end)
 
 --

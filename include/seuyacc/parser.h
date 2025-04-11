@@ -10,14 +10,6 @@
 
 namespace seuyacc {
 
-// 定义解析器状态
-enum class ParserState {
-    EXPECTING_RULE_NAME, // 期望规则名
-    EXPECTING_COLON, // 期望冒号
-    IN_PRODUCTION, // 在产生式中
-    END_OF_RULE // 规则结束
-};
-
 // 语法文件的解析器
 class YaccParser {
 public:
@@ -40,16 +32,26 @@ public:
     void printParsedInfo() const;
 
 private:
+    // 定义部分处理函数
     void parseTokenSection(const std::string& line);
-    void parseGrammarRules(const std::string& line);
     void parseStartSymbol(const std::string& line);
-    void processProductionPart(const std::string& part);
-    void parseProductionRightSide(const std::string& right_side, Production& prod);
+
+    // 规则部分按字符处理的函数
+    bool parseRulesSection(std::ifstream& file);
+    bool parseRule(std::string& buffer, size_t& pos);
+    bool parseRuleName(std::string& buffer, size_t& pos, std::string& rule_name);
+    bool parseProductions(std::string& buffer, size_t& pos, const std::string& rule_name);
+    bool parseProduction(std::string& buffer, size_t& pos, const std::string& rule_name);
+    bool parseSymbol(std::string& buffer, size_t& pos, Symbol& symbol);
+    bool parseSemanticAction(std::string& buffer, size_t& pos, std::string& action);
+
+    // 辅助函数
+    void skipWhitespaceAndComments(std::string& buffer, size_t& pos);
+    bool checkChar(std::string& buffer, size_t pos, char expected);
     void validateNonTerminals();
 
     // 当前正在处理的规则
     std::string current_rule_name;
-    ParserState parser_state = ParserState::EXPECTING_RULE_NAME;
 
     // 存储所有已知的非终结符
     std::unordered_set<std::string> non_terminals;

@@ -10,6 +10,7 @@ namespace seuyacc {
 struct Production {
     Symbol left; // 产生式左部
     std::vector<Symbol> right; // 产生式右部符号列表
+    std::string semantic_action; // 语义动作代码
 };
 
 } // namespace seuyacc
