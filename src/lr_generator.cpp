@@ -653,6 +653,28 @@ std::string LRGenerator::getProductionString(int index) const
     return "未知产生式";
 }
 
+// 从Union代码中提取YYSTYPE定义
+std::string LRGenerator::extractYYSTYPE() const
+{
+    std::string unionCode = parser.union_code;
+    if (unionCode.empty()) {
+        // 没有定义union，返回默认的YYSTYPE
+        return "typedef int YYSTYPE;";
+    }
+
+    // 提取union代码块内容
+    size_t start = unionCode.find('{');
+    size_t end = unionCode.rfind('}');
+
+    if (start != std::string::npos && end != std::string::npos && start < end) {
+        // 返回整个union定义
+        return "typedef union " + unionCode.substr(start, end - start + 1) + " YYSTYPE;";
+    }
+
+    // 如果解析失败，返回默认定义
+    return "typedef int YYSTYPE;";
+}
+
 /// 将ACTION和GOTO表导出为Markdown格式
 std::string LRGenerator::toMarkdownTable() const
 {
@@ -795,5 +817,149 @@ std::string LRGenerator::toMarkdownTable() const
     std::string result = ss.str();
 
     return result;
+}
+
+// 导出C语言头文件
+std::string LRGenerator::generateHeaderFile(const std::string& filename) const
+{
+    std::stringstream ss;
+
+    std::string headerGuard = filename;
+    std::transform(headerGuard.begin(), headerGuard.end(), headerGuard.begin(),
+        [](unsigned char c) { return std::toupper(c); });
+    std::replace(headerGuard.begin(), headerGuard.end(), '.', '_');
+
+    // 添加简洁的头文件注释
+    ss << "/* 由 SeuYacc 生成的 LR(1) 解析器头文件 */\n\n";
+
+    // 添加头文件保护宏
+    ss << "#ifndef " << headerGuard << "_INCLUDED\n";
+    ss << "# define " << headerGuard << "_INCLUDED\n";
+
+    // 添加调试跟踪的宏定义
+    ss << "/* 调试跟踪设置 */\n";
+    ss << "#ifndef YYDEBUG\n";
+    ss << "# define YYDEBUG 0\n";
+    ss << "#endif\n";
+    ss << "#if YYDEBUG\n";
+    ss << "extern int yydebug;\n";
+    ss << "#endif\n\n";
+
+    // 添加令牌类型定义
+    ss << "/* 令牌类型定义 */\n";
+    ss << "#ifndef YYTOKENTYPE\n";
+    ss << "# define YYTOKENTYPE\n";
+    ss << "  enum yytokentype\n";
+    ss << "  {\n";
+    ss << "    YYEMPTY = -2,\n";
+    ss << "    YYEOF = 0,                     /* \"文件结束\" */\n";
+    ss << "    YYerror = 256,                 /* 错误 */\n";
+    ss << "    YYUNDEF = 257,                 /* \"无效令牌\" */\n";
+
+    // 获取所有终结符并按名称排序
+    std::vector<Symbol> terminals = getSortedTerminals();
+    int tokenValue = 258; // 从258开始，前面已经使用了一些特殊值
+
+    // 添加终结符令牌定义（不包括$和ε）
+    for (const auto& terminal : terminals) {
+        if (terminal.name != "$" && terminal.name != "ε") {
+            std::string tokenName = terminal.name;
+            // 如果是字面量，转换为有效的C标识符
+            if (terminal.type == ElementType::LITERAL) {
+                tokenName = "LITERAL_" + std::to_string(tokenValue);
+            }
+            ss << "    " << tokenName << " = " << tokenValue << ",";
+            // 添加可选注释
+            if (terminal.type == ElementType::LITERAL) {
+                ss << "                 /* " << terminal.name << " */";
+            }
+            ss << "\n";
+            tokenValue++;
+        }
+    }
+
+    ss << "  };\n";
+    ss << "  typedef enum yytokentype yytoken_kind_t;\n";
+    ss << "#endif\n\n";
+
+    // 添加令牌定义宏
+    ss << "/* 令牌定义宏 */\n";
+    ss << "#define YYEMPTY -2\n";
+    ss << "#define YYEOF 0\n";
+    ss << "#define YYerror 256\n";
+    ss << "#define YYUNDEF 257\n";
+
+    tokenValue = 258;
+    for (const auto& terminal : terminals) {
+        if (terminal.name != "$" && terminal.name != "ε") {
+            std::string tokenName = terminal.name;
+            if (terminal.type == ElementType::LITERAL) {
+                tokenName = "LITERAL_" + std::to_string(tokenValue);
+            }
+            ss << "#define " << tokenName << " " << tokenValue << "\n";
+            tokenValue++;
+        }
+    }
+    ss << "\n";
+
+    // 添加值类型定义
+    ss << "/* 值类型定义 */\n";
+    ss << "#if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED\n";
+
+    // 从文法中提取union定义
+    if (!parser.union_code.empty()) {
+        size_t lineNumber = 1;
+        std::string unionContent;
+        std::istringstream unionStream(parser.union_code);
+        std::string line;
+
+        // 跳过开头的 %{ 或 %}
+        while (std::getline(unionStream, line)) {
+            if (line.find("{") != std::string::npos) {
+                unionContent += "union YYSTYPE\n{\n";
+                break;
+            }
+            lineNumber++;
+        }
+
+        // 处理union内容
+        while (std::getline(unionStream, line)) {
+            if (line.find("}") != std::string::npos) {
+                unionContent += "};\n";
+                break;
+            }
+            unionContent += line + "\n";
+            lineNumber++;
+        }
+
+        ss << unionContent << "\n";
+        ss << "typedef union YYSTYPE YYSTYPE;\n";
+        ss << "# define YYSTYPE_IS_TRIVIAL 1\n";
+        ss << "# define YYSTYPE_IS_DECLARED 1\n";
+    } else {
+        // 如果没有定义union，提供默认定义
+        ss << "union YYSTYPE\n";
+        ss << "{\n";
+        ss << "  int ival;\n";
+        ss << "  char* sval;\n";
+        ss << "};\n";
+        ss << "typedef union YYSTYPE YYSTYPE;\n";
+        ss << "# define YYSTYPE_IS_TRIVIAL 1\n";
+        ss << "# define YYSTYPE_IS_DECLARED 1\n";
+    }
+    ss << "#endif\n\n";
+
+    // 添加外部变量声明
+    ss << "\n/* 外部变量声明 */\n";
+    ss << "extern YYSTYPE yylval;\n\n";
+
+    // 添加解析函数声明
+    ss << "\n/* 解析函数声明 */\n";
+    ss << "int yyparse(void);\n\n";
+
+    // 添加头文件结尾保护宏
+    ss << "\n#endif /* !" << headerGuard << "_INCLUDED */\n";
+
+    return ss.str();
 }
 }

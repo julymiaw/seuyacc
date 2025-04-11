@@ -51,6 +51,9 @@ public:
     // 将ACTION和GOTO表导出为Markdown格式
     std::string toMarkdownTable() const;
 
+    // 导出C语言头文件
+    std::string generateHeaderFile(const std::string& filename = "y.tab.h") const;
+
 private:
     // 辅助方法：将ActionEntry转换为可读字符串
     std::string actionEntryToString(const ActionEntry& entry) const;
@@ -63,6 +66,9 @@ private:
 
     // 辅助方法：找到产生式的字符串表示
     std::string getProductionString(int index) const;
+
+    // 辅助方法：从Union代码中提取YYSTYPE
+    std::string extractYYSTYPE() const;
 
     // 计算文法符号的FIRST集
     std::unordered_set<Symbol, SymbolHasher> computeFirst(const Symbol& symbol);
