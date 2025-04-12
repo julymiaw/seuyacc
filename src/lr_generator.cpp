@@ -201,8 +201,6 @@ void LRGenerator::buildActionGotoTable()
 
                             if (resolved) {
                                 resolved_rr_conflicts++;
-                                std::cout << "规约/规约冲突已解决(优先级): 状态 " << stateId
-                                          << ", 符号 " << item.lookahead.name << std::endl;
                             } else {
                                 std::cout << "规约/规约冲突: 状态 " << stateId
                                           << ", 符号 " << item.lookahead.name
@@ -227,7 +225,7 @@ void LRGenerator::buildActionGotoTable()
         // 然后处理所有移入项（即从该状态出发的转移）
         for (const StateTransition& transition : transitions) {
             if (transition.from_state == stateId) {
-                if (transition.symbol.type == ElementType::TOKEN) {
+                if (transition.symbol.type != ElementType::NON_TERMINAL) {
                     // 终结符转移对应移入动作
 
                     // 检查是否已经有针对该符号的规约动作
@@ -286,8 +284,6 @@ void LRGenerator::buildActionGotoTable()
 
                             if (resolved) {
                                 resolved_sr_conflicts++;
-                                // std::cout << "移入/规约冲突已解决(优先级/结合性): 状态 " << stateId
-                                //           << ", 符号 " << lookAhead.name << std::endl;
                             } else {
                                 std::cout << "移入/规约冲突: 状态 " << stateId
                                           << ", 符号 " << transition.symbol.name
@@ -916,25 +912,66 @@ std::string LRGenerator::toPlantUML() const
     return ss.str();
 }
 
-// 获取所有终结符（按名称排序）
+// 获取所有终结符（按ASCII顺序排序，预留前256个位置）
 std::vector<Symbol> LRGenerator::getSortedTerminals() const
 {
     std::vector<Symbol> terminals;
 
-    // 收集所有终结符，包括EOF符号$
+    // 首先添加EOF符号$，作为终结符的第一个（索引0）
     Symbol endSymbol = { "$", ElementType::TOKEN };
     terminals.push_back(endSymbol);
 
-    for (const auto& [name, symbol] : parser.symbol_table) {
-        if (symbol.type == ElementType::TOKEN && name != "$" && name != "ε") {
-            terminals.push_back(symbol);
+    // 添加256个ASCII字符作为字面量（索引1-256）
+    for (int i = 1; i <= 256; i++) {
+        std::string charName = "'";
+        char c = static_cast<char>(i);
+
+        // 处理特殊字符，避免显示问题
+        if (c == '\n')
+            charName += "\\n";
+        else if (c == '\r')
+            charName += "\\r";
+        else if (c == '\t')
+            charName += "\\t";
+        else if (c == '\'')
+            charName += "\\'";
+        else if (c == '\\')
+            charName += "\\\\";
+        else if (isprint(c))
+            charName += c;
+        else
+            charName += "\\x" + std::to_string(i);
+
+        charName += "'";
+
+        // 查看符号表中是否有该字面量
+        Symbol literal = { charName, ElementType::LITERAL };
+        auto it = parser.symbol_table.find(charName);
+        if (it != parser.symbol_table.end()) {
+            // 使用符号表中的定义但保持类型为LITERAL
+            literal = it->second;
+            literal.type = ElementType::LITERAL;
         }
+
+        terminals.push_back(literal);
     }
 
-    // 按名称排序
-    std::sort(terminals.begin(), terminals.end(), [](const Symbol& a, const Symbol& b) {
-        return a.name < b.name;
-    });
+    // 最后添加其他TOKEN类型的终结符（索引从256开始）
+    for (const auto& [name, symbol] : parser.symbol_table) {
+        if (symbol.type == ElementType::TOKEN && name != "$" && name != "ε") {
+            // 检查是否已经添加过（避免重复）
+            bool alreadyAdded = false;
+            for (const auto& term : terminals) {
+                if (term.name == symbol.name) {
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+            if (!alreadyAdded) {
+                terminals.push_back(symbol);
+            }
+        }
+    }
 
     return terminals;
 }
@@ -1025,11 +1062,16 @@ std::string LRGenerator::toMarkdownTable() const
 {
     std::stringstream ss;
 
+    std::vector<Symbol> terminals = getSortedTerminals();
+    std::vector<Symbol> nonTerminals = getSortedNonTerminals();
+
     // 生成标题和基本信息
     ss << "# LR(1) 分析表\n\n";
     ss << "## 基本信息\n\n";
     ss << "- 状态数量: " << canonical_collection.size() << "\n";
-    ss << "- 终结符数量: " << getSortedTerminals().size() - 1 << " (不含 $)\n";
+    ss << "- 终结符数量: " << terminals.size() - 1 << " (不含 $)\n";
+    ss << "- 其中字面量数量: " << 255 << "\n";
+    ss << "- 其中Token数量: " << (terminals.size() - 256) << "\n";
     ss << "- 非终结符数量: " << getSortedNonTerminals().size() << "\n";
     ss << "- 产生式数量: " << parser.productions.size() << "\n\n";
 
@@ -1060,39 +1102,69 @@ std::string LRGenerator::toMarkdownTable() const
     }
     ss << "\n";
 
-    // 收集终结符和非终结符
-    std::vector<Symbol> terminals = getSortedTerminals();
-    std::vector<Symbol> nonTerminals = getSortedNonTerminals();
-
     // 生成ACTION表
     ss << "## ACTION表\n\n";
-    ss << "| 状态 |";
 
-    // ACTION表头：终结符
-    for (const auto& terminal : terminals) {
-        ss << " " << terminal.name << " |";
+    // 收集有动作项的终结符
+    std::vector<std::pair<int, Symbol>> usedTerminals;
+    usedTerminals.push_back({ 0, terminals[0] }); // $符号总是包含的
+
+    for (int i = 1; i < terminals.size(); ++i) {
+        bool used = false;
+        for (int state = 0; state < canonical_collection.size(); ++state) {
+            if (action_table.find(state) != action_table.end() && action_table.at(state).find(terminals[i]) != action_table.at(state).end() && action_table.at(state).at(terminals[i]).type != ActionType::ERROR) {
+                usedTerminals.push_back({ i, terminals[i] });
+                used = true;
+                break;
+            }
+        }
     }
-    ss << "\n| --- |";
 
+    // 生成表头行1: 列序号
+    ss << "| 编号 |";
+    for (const auto& [index, _] : usedTerminals) {
+        ss << " " << index << " |";
+    }
+
+    ss << "\n| --- |";
     // 表头分隔线
-    for (size_t i = 0; i < terminals.size(); ++i) {
+    for (size_t i = 0; i < usedTerminals.size(); ++i) {
         ss << " --- |";
     }
     ss << "\n";
 
-    // ACTION表内容：每个状态对每个终结符的动作
-    for (int state = 0; state < canonical_collection.size(); ++state) {
-        ss << "| " << state << " |";
+    // 生成表头行2: 终结符名称
+    ss << "| 状态 |";
+    for (const auto& [_, term] : usedTerminals) {
+        ss << " " << term.name << " |";
+    }
+    ss << "\n";
 
-        for (const auto& terminal : terminals) {
-            if (action_table.find(state) != action_table.end() && action_table.at(state).find(terminal) != action_table.at(state).end()) {
-                ss << " " << actionEntryToString(action_table.at(state).at(terminal)) << " |";
+    // ACTION表内容
+    for (int state = 0; state < canonical_collection.size(); ++state) {
+        bool hasAction = false;
+        std::stringstream rowss;
+        rowss << "| " << state << " |";
+
+        for (const auto& [index, term] : usedTerminals) {
+            if (action_table.find(state) != action_table.end() && action_table.at(state).find(term) != action_table.at(state).end()) {
+
+                const ActionEntry& entry = action_table.at(state).at(term);
+                if (entry.type != ActionType::ERROR) {
+                    rowss << " " << actionEntryToString(entry) << " |";
+                    hasAction = true;
+                } else {
+                    rowss << " |";
+                }
             } else {
-                ss << " |";
+                rowss << " |";
             }
         }
 
-        ss << "\n";
+        // 只输出有动作的行
+        if (hasAction) {
+            ss << rowss.str() << "\n";
+        }
     }
     ss << "\n";
 
@@ -1208,7 +1280,8 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
             std::string tokenName = terminal.name;
             // 如果是字面量，转换为有效的C标识符
             if (terminal.type == ElementType::LITERAL) {
-                tokenName = "LITERAL_" + std::to_string(tokenValue);
+                tokenValue++;
+                continue;
             }
             ss << "    " << tokenName << " = " << tokenValue << ",";
             if (terminal.type == ElementType::LITERAL) {
@@ -1220,7 +1293,6 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
     }
 
     ss << "  };\n";
-    ss << "  typedef enum yytokentype yytoken_kind_t;\n";
     ss << "#endif\n\n";
 
     // 添加令牌定义宏
@@ -1232,7 +1304,8 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
         if (terminal.name != "$" && terminal.name != "ε") {
             std::string tokenName = terminal.name;
             if (terminal.type == ElementType::LITERAL) {
-                tokenName = "LITERAL_" + std::to_string(tokenValue);
+                tokenValue++;
+                continue; // 跳过字面量
             }
             ss << "#define " << tokenName << " " << tokenValue << "\n";
             tokenValue++;

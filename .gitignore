@@ -8,3 +8,10 @@ build/
 .vscode
 
 *.exe
+
+examples/*.md
+examples/*.puml
+examples/*.tab.c
+examples/*.tab.h
+examples/lex.yy.c
+examples/ast.dot

@@ -783,17 +783,10 @@ void YaccParser::validateSymbols()
     for (const auto& [name, symbol] : temp_symbols) {
         // 如果是被当作非终结符使用，但不在已定义的非终结符集合中
         if (symbol.type == ElementType::NON_TERMINAL && defined_non_terminals.find(name) == defined_non_terminals.end()) {
-
-            // 检查是否在符号表中被定义为token
-            if (symbol_table.find(name) != symbol_table.end() && symbol_table[name].type == ElementType::TOKEN) {
-                std::cerr << "警告: 符号 \"" << name << "\" 被定义为终结符(token)，"
-                          << "但在产生式右部被当作非终结符使用" << std::endl;
-            } else {
-                undefined_symbol_count++;
-                undefined_symbols.push_back(name);
-                std::cerr << "警告: 符号 \"" << name << "\" 被使用但未被定义为终结符且没有产生式规则"
-                          << std::endl;
-            }
+            undefined_symbol_count++;
+            undefined_symbols.push_back(name);
+            std::cerr << "警告: 符号 \"" << name << "\" 被使用但未被定义为终结符且没有产生式规则"
+                      << std::endl;
         }
     }
 
@@ -809,16 +802,16 @@ void YaccParser::validateSymbols()
 
     // 现在更新symbol_table，加入所有在语法规则中定义或使用的符号
     for (const auto& [name, symbol] : temp_symbols) {
-        // 如果符号不在symbol_table中，或者在symbol_table中但需要更新
-        if (symbol_table.find(name) == symbol_table.end() || (symbol_table[name].type != ElementType::TOKEN && symbol.type != ElementType::NON_TERMINAL)) {
+        // 如果符号不在symbol_table中，进行更新
+        if (symbol_table.find(name) == symbol_table.end()) {
             symbol_table[name] = symbol;
         }
     }
 
     // 将所有产生式左部的非终结符加入symbol_table
     for (const auto& [name, symbol] : defined_non_terminals) {
-        // 如果符号不在symbol_table中或需要更新
-        if (symbol_table.find(name) == symbol_table.end() || symbol_table[name].type != ElementType::NON_TERMINAL) {
+        // 如果符号不在symbol_table中，进行更新
+        if (symbol_table.find(name) == symbol_table.end()) {
             symbol_table[name] = symbol;
         } else if (!symbol.value_type.empty() && symbol_table[name].value_type.empty()) {
             // 更新类型信息
