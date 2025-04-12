@@ -538,7 +538,7 @@ bool YaccParser::parseProduction(std::string& buffer, size_t& pos, const std::st
             prod.right.push_back(symbol);
 
             // 更新产生式的优先级为右部最右边的终结符的优先级
-            if (symbol.type == ElementType::TOKEN && symbol.precedence > 0) {
+            if (symbol.precedence > 0) {
                 prod.precedence = symbol.precedence;
             }
         } else {
@@ -590,8 +590,18 @@ bool YaccParser::parseSymbol(std::string& buffer, size_t& pos, Symbol& symbol)
             } else if (c == '\'' && !escaped) {
                 // 找到匹配的结束单引号
                 pos++; // 跳过结束单引号
-                symbol.name = buffer.substr(start_pos, pos - start_pos);
+                std::string literal_name = buffer.substr(start_pos, pos - start_pos);
+                symbol.name = literal_name;
                 symbol.type = ElementType::LITERAL;
+
+                // 查找符号表中是否已定义此字面量
+                if (symbol_table.find(literal_name) != symbol_table.end()) {
+                    // 使用符号表中定义的属性，但保持类型为LITERAL
+                    Symbol& existing_sym = symbol_table[literal_name];
+                    symbol.precedence = existing_sym.precedence;
+                    symbol.assoc = existing_sym.assoc;
+                    symbol.value_type = existing_sym.value_type;
+                }
 
                 // 将字面量添加到临时符号表
                 temp_symbols[symbol.name] = symbol;
