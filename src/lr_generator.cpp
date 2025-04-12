@@ -316,8 +316,6 @@ void LRGenerator::buildActionGotoTable()
     if (shift_reduce_conflicts == resolved_sr_conflicts && reduce_reduce_conflicts == resolved_rr_conflicts) {
         if (shift_reduce_conflicts > 0 || reduce_reduce_conflicts > 0) {
             std::cout << "所有冲突已通过优先级和结合性规则解决！" << std::endl;
-        } else {
-            std::cout << "文法没有冲突，是LALR(1)文法！" << std::endl;
         }
     }
 }
