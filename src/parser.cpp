@@ -150,11 +150,9 @@ void YaccParser::parseStartSymbol(const std::string& line)
 bool YaccParser::parseDeclarationCode(std::ifstream& file)
 {
     std::string line;
-    declaration_code = "%{\n"; // 保留开始标记
 
     while (std::getline(file, line)) {
         if (line == "%}") {
-            declaration_code += "%}\n"; // 保留结束标记
             return true;
         }
         declaration_code += line + "\n";

@@ -8,7 +8,8 @@ int main(int argc, char** argv)
 {
     bool generate_plantUML = false;
     bool generate_markdown = false;
-    bool generate_header = false; // 新增头文件生成选项
+    bool generate_header = false;
+    bool generate_parser = true;
     std::string input_file;
 
     // 解析命令行参数
@@ -19,7 +20,7 @@ int main(int argc, char** argv)
         } else if (arg == "--markdown" || arg == "-m") {
             generate_markdown = true;
         } else if (arg == "--definitions" || arg == "-d") {
-            generate_header = true; // 兼容 Yacc/Bison 的 -d 选项
+            generate_header = true;
         } else if (input_file.empty()) {
             input_file = arg;
         }
@@ -125,7 +126,21 @@ int main(int argc, char** argv)
                 }
             }
 
-            std::cout << "LR(1)分析表生成完成\n";
+            if (generate_parser) {
+                std::string parser_name = file_name_without_ext + ".tab.c";
+                std::string output_file = file_dir + parser_name;
+                std::string parser_content = generator.generateParserCode(parser_name);
+
+                std::ofstream parser_file(output_file);
+                if (parser_file.is_open()) {
+                    parser_file << parser_content;
+                    parser_file.close();
+                    std::cout << "解析器代码文件已生成: " << output_file << std::endl;
+                } else {
+                    std::cerr << "无法创建解析器代码文件: " << output_file << std::endl;
+                }
+            }
+
         } catch (const std::exception& e) {
             std::cerr << "生成LR(1)分析表时发生异常: " << e.what() << std::endl;
             return 1;
