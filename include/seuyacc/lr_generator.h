@@ -34,25 +34,17 @@ public:
     // 生成LR(1)分析表
     void generateTable();
 
+    // 导出C语言头文件
+    std::string generateHeaderFile(const std::string& filename = "y.tab.h") const;
+
+    // 导出C语言分析器代码
+    std::string generateParserCode(const std::string& filename = "y.tab.c") const;
+
     // 将自动机转换为PlantUML格式
     std::string toPlantUML() const;
 
-    // 获取生成的分析表
-    const std::map<int, std::map<Symbol, ActionEntry>>& getActionTable() const
-    {
-        return action_table;
-    }
-
-    const std::map<int, std::map<Symbol, int>>& getGotoTable() const
-    {
-        return goto_table;
-    }
-
     // 将ACTION和GOTO表导出为Markdown格式
     std::string toMarkdownTable() const;
-
-    // 导出C语言头文件
-    std::string generateHeaderFile(const std::string& filename = "y.tab.h") const;
 
 private:
     // 辅助方法：将ActionEntry转换为可读字符串
@@ -88,6 +80,16 @@ private:
 
     // 添加增广文法的起始产生式
     void addAugmentedProduction();
+
+    // 处理语义动作中的 $$ 和 $N 替换
+    std::string processSemanticAction(const std::string& action,
+        const Production& prod) const;
+
+    // 生成各部分代码
+    std::string generateHeaderSection() const;
+    std::string generateDataTables() const;
+    std::string generateParsingFunction() const;
+    std::string generateReduceActions() const;
 
     // 解析后的文法
     YaccParser parser;

@@ -431,6 +431,351 @@ void LRGenerator::addAugmentedProduction()
     parser.productions.insert(parser.productions.begin(), augmentedProd);
 }
 
+// 处理语义动作中的 $$ 和 $N 替换
+std::string LRGenerator::processSemanticAction(const std::string& action, const Production& prod) const
+{
+    if (action.empty()) {
+        return "/* 无语义动作 */";
+    }
+
+    std::string processed = action;
+    std::string result;
+
+    // 处理 $$ (左值赋值)
+    size_t pos = 0;
+    while ((pos = processed.find("$$", pos)) != std::string::npos) {
+        std::string replacement = "yyval";
+
+        // 如果非终结符有类型信息，添加适当的成员访问
+        if (!prod.left.value_type.empty()) {
+            replacement += "." + prod.left.value_type;
+        }
+
+        processed.replace(pos, 2, replacement);
+        pos += replacement.length();
+    }
+
+    // 处理 $N (右值引用)
+    pos = 0;
+    while (pos < processed.length()) {
+        if (processed[pos] == '$' && pos + 1 < processed.length() && std::isdigit(processed[pos + 1])) {
+
+            size_t start = pos;
+            pos++; // 跳过 $
+
+            // 读取数字
+            std::string num;
+            while (pos < processed.length() && std::isdigit(processed[pos])) {
+                num += processed[pos];
+                pos++;
+            }
+
+            int index = std::stoi(num);
+
+            // 确保索引有效
+            if (index > 0 && index <= prod.right.size()) {
+                // 关键修改: 使用正确的索引对应关系
+                std::string replacement = "yyvsp[" + num + "]";
+
+                // 如果对应的符号有类型信息，添加适当的成员访问
+                const Symbol& sym = prod.right[index - 1];
+                if (!sym.value_type.empty()) {
+                    replacement += "." + sym.value_type;
+                }
+
+                processed.replace(start, num.length() + 1, replacement);
+                pos = start + replacement.length();
+            }
+        } else {
+            pos++;
+        }
+    }
+
+    return processed;
+}
+
+// 生成语法分析器代码
+std::string LRGenerator::generateParserCode(const std::string& filename) const
+{
+    std::stringstream ss;
+
+    // 添加头部注释和包含文件
+    ss << "/* 由 SeuYacc 生成的 LR(1) 解析器 */\n\n";
+
+    // 包含生成的头文件
+    std::string headerName = filename;
+    size_t dot_pos = headerName.find_last_of('.');
+    if (dot_pos != std::string::npos) {
+        headerName = headerName.substr(0, dot_pos) + ".h";
+    } else {
+        headerName += ".h";
+    }
+
+    ss << "#include \"" << headerName << "\"\n";
+
+    // 添加用户声明代码块
+    if (!parser.declaration_code.empty()) {
+        ss << "/* 用户声明代码 */\n";
+        ss << parser.declaration_code << "\n\n";
+    }
+
+    std::vector<Symbol> terminals = getSortedTerminals();
+    std::vector<Symbol> nonTerminals = getSortedNonTerminals();
+
+    // 添加全局变量定义
+    ss << "/* 全局变量定义 */\n";
+    ss << "YYSTYPE yylval;\n\n";
+
+    // 添加解析器内部定义和宏
+    ss << "/* 解析器内部定义 */\n";
+    ss << "#ifndef YYMAXDEPTH\n";
+    ss << "# define YYMAXDEPTH 10000\n"; // 添加YYMAXDEPTH定义
+    ss << "#endif\n\n";
+    ss << "#define YYFINAL " << (canonical_collection.size() - 1) << "\n";
+    ss << "#define YYLAST " << (canonical_collection.size() * terminals.size()) << "\n\n";
+
+    ss << "#define YYNTOKENS " << terminals.size() << "\n";
+    ss << "#define YYNNTS " << nonTerminals.size() << "\n";
+    ss << "#define YYNRULES " << parser.productions.size() << "\n";
+    ss << "#define YYNSTATES " << canonical_collection.size() << "\n\n";
+
+    // 添加动作和状态转移表
+    ss << "/* 解析表 */\n";
+
+    // 生成动作表
+    ss << "static const short yytable[] = {\n";
+
+    for (int state = 0; state < canonical_collection.size(); ++state) {
+        ss << "  /* 状态 " << state << " */\n  ";
+        for (const auto& terminal : terminals) {
+            if (action_table.find(state) != action_table.end() && action_table.at(state).find(terminal) != action_table.at(state).end()) {
+
+                const ActionEntry& entry = action_table.at(state).at(terminal);
+
+                // 编码动作:
+                // 正数 = 移入并转到该状态
+                // 负数 = 按照产生式规约 (-规则号-1)
+                // 0 = 接受
+                int code;
+
+                switch (entry.type) {
+                case ActionType::SHIFT:
+                    code = entry.value;
+                    break;
+                case ActionType::REDUCE:
+                    code = -entry.value - 1;
+                    break;
+                case ActionType::ACCEPT:
+                    code = 0;
+                    break;
+                default: // ERROR
+                    code = -32767; // 表示错误
+                }
+
+                ss << code << ", ";
+            } else {
+                // 错误
+                ss << "-32767, ";
+            }
+        }
+        ss << "\n";
+    }
+    ss << "};\n\n";
+
+    // 生成GOTO表
+    ss << "static const short yygoto[] = {\n";
+
+    for (int state = 0; state < canonical_collection.size(); ++state) {
+        ss << "  /* 状态 " << state << " */\n  ";
+        for (const auto& nonTerminal : nonTerminals) {
+            if (goto_table.find(state) != goto_table.end() && goto_table.at(state).find(nonTerminal) != goto_table.at(state).end()) {
+
+                int nextState = goto_table.at(state).at(nonTerminal);
+                ss << nextState << ", ";
+            } else {
+                // 无效状态
+                ss << "-1, ";
+            }
+        }
+        ss << "\n";
+    }
+    ss << "};\n\n";
+
+    // 产生式左部的非终结符索引表
+    ss << "/* 每条产生式左部的非终结符索引 */\n";
+    ss << "static const short yyr1[] = {\n  ";
+
+    // 计算非终结符的索引（从YYNTOKENS开始）
+    std::unordered_map<std::string, int> nonterm_index;
+    int idx = terminals.size(); // 非终结符索引从终结符数量开始
+    for (const auto& nt : nonTerminals) {
+        nonterm_index[nt.name] = idx++;
+    }
+
+    // 生成yyr1数组
+    for (const auto& prod : parser.productions) {
+        if (nonterm_index.find(prod.left.name) != nonterm_index.end()) {
+            ss << nonterm_index[prod.left.name] << ", ";
+        } else {
+            ss << "0, "; // 默认值，理论上不会出现
+        }
+    }
+
+    ss << "\n};\n\n";
+
+    // 产生式长度表
+    ss << "/* 每条产生式右部的符号数量 */\n";
+    ss << "static const short yyr2[] = {\n  ";
+
+    for (const auto& prod : parser.productions) {
+        ss << prod.right.size() << ", ";
+    }
+
+    ss << "\n};\n\n";
+
+    // 生成规约动作代码
+    ss << "/* 执行规约动作 */\n";
+    ss << "static void yy_reduce(int rule_num, int* top, YYSTYPE* stack, int* state_stack) {\n";
+    ss << "  int symbols_to_pop = yyr2[rule_num];\n";
+    ss << "  printf(\"  规约详情: 规则%d, 当前栈顶=%d, 弹出%d个符号\\n\", rule_num, *top, symbols_to_pop);\n";
+    ss << "  YYSTYPE yyval;\n\n";
+
+    ss << "  /* 计算栈中元素的位置, $1 是栈中第一个要规约的元素 */\n";
+    ss << "  /* 对应关系: $1 = yyvsp[1], $2 = yyvsp[2], 以此类推 */\n";
+    ss << "  YYSTYPE yyvsp[YYMAXDEPTH + 1]; // 临时数组，下标从1开始\n";
+    ss << "  for (int i = 1; i <= symbols_to_pop; i++) {\n";
+    ss << "    yyvsp[i] = stack[*top - symbols_to_pop + i];\n";
+    ss << "  }\n\n";
+
+    ss << "  /* 默认动作: 将$1的值赋给$$ */\n";
+    ss << "  if (symbols_to_pop > 0) {\n";
+    ss << "    yyval = yyvsp[1]; // $$ = $1\n";
+    ss << "  }\n\n";
+
+    ss << "  /* 根据规则执行语义动作 */\n";
+    ss << "  printf(\"  执行语义动作: 规则%d\\n\", rule_num);\n";
+    ss << "  switch(rule_num) {\n";
+
+    // 生成每条规则的语义动作
+    for (size_t i = 0; i < parser.productions.size(); ++i) {
+        const Production& prod = parser.productions[i];
+
+        ss << "    case " << i << ": /* " << prod.left.name << " -> ";
+        if (prod.right.empty()) {
+            ss << "ε";
+        } else {
+            for (const Symbol& sym : prod.right) {
+                ss << sym.name << " ";
+            }
+        }
+
+        ss << " */\n";
+
+        // 如果有语义动作，处理并添加它
+        if (!prod.semantic_action.empty()) {
+            std::string processed_action = processSemanticAction(
+                prod.semantic_action.substr(1, prod.semantic_action.length() - 2), // 去除大括号
+                prod);
+            ss << "      {\n"; // 添加开始花括号
+            ss << "        " << processed_action << "\n";
+            ss << "        printf(\"    完成语义动作: %s\\n\", \"" << prod.left.name << "\");\n";
+            ss << "      }\n"; // 添加结束花括号
+        }
+
+        ss << "      break;\n";
+    }
+
+    ss << "  }\n\n";
+    ss << "  /* 保存归约结果，主函数负责调整栈 */\n";
+    ss << "  stack[*top - symbols_to_pop + 1] = yyval;\n";
+    ss << "}\n\n";
+
+    // 主解析函数
+    ss << "/* 语法分析主函数 */\n";
+    ss << "int yyparse(void) {\n";
+    ss << "  int state = 0;\n";
+    ss << "  int top = 0;\n";
+    ss << "  int token;\n";
+    ss << "  int action;\n";
+    ss << "  YYSTYPE stack[YYMAXDEPTH];\n";
+    ss << "  int state_stack[YYMAXDEPTH];\n\n"; // 添加状态栈
+
+    ss << "  printf(\"====== 开始语法分析 ======\\n\");\n";
+    ss << "  state_stack[0] = 0;\n";
+    ss << "  token = yylex();\n";
+    ss << "  printf(\"获取首个token: %d\\n\", token);\n\n";
+
+    ss << "  while (1) {\n";
+    ss << "    printf(\"当前状态: %d, token: %d\\n\", state, token);\n";
+    ss << "    action = yytable[state * YYNTOKENS + token];\n\n";
+    ss << "    printf(\"查找动作: yytable[%d * %d + %d] = %d\\n\", state, YYNTOKENS, token, action);\n\n";
+
+    ss << "    if (action == -32767) { /* 错误 */\n";
+    ss << "      yyerror(\"语法错误\");\n";
+    ss << "      return 1;\n";
+    ss << "    }\n\n";
+
+    ss << "    if (action > 0) { /* 移入 */\n";
+    ss << "      printf(\"执行移入操作: 状态%d -> 状态%d\\n\", state, action);\n";
+    ss << "      stack[++top] = yylval;\n";
+    ss << "      state_stack[top] = action;\n"; // 存储新状态
+    ss << "      state = action;\n";
+    ss << "      token = yylex();\n";
+    ss << "      printf(\"获取下一个token: %d\\n\", token);\n";
+    ss << "    } else if (action < 0) { /* 规约 */\n";
+    ss << "      int rule = -action - 1;\n";
+    ss << "      printf(\"执行规约操作: 使用规则%d\\n\", rule);\n";
+    ss << "      yy_reduce(rule, &top, stack, state_stack);\n";
+    ss << "      printf(\"规约后的栈顶位置: %d\\n\", top);\n";
+
+    ss << "      /* 弹出状态栈中的规约符号对应的状态 */\n";
+    ss << "      int symbols_to_pop = yyr2[rule];\n";
+    ss << "      top -= symbols_to_pop;\n"; // 先调整栈顶指针
+    ss << "      printf(\"规约后的状态栈顶: %d, 当前状态: %d\\n\", top, state_stack[top]);\n";
+
+    ss << "      /* 通过GOTO表确定新状态 */\n";
+    ss << "      int nonterminal = yyr1[rule] - YYNTOKENS;\n";
+    ss << "      int goto_index = state_stack[top] * YYNNTS + nonterminal;\n";
+    ss << "      printf(\"GOTO表查询: 状态%d + 非终结符%d, 索引=%d\\n\", state_stack[top], nonterminal, goto_index);\n";
+
+    // 添加安全检查
+    ss << "      if (goto_index < 0 || goto_index >= " << (canonical_collection.size() * nonTerminals.size()) << ") {\n";
+    ss << "        printf(\"错误: GOTO表索引越界! goto_index=%d\\n\", goto_index);\n";
+    ss << "        yyerror(\"GOTO表索引错误\");\n";
+    ss << "        return 3;\n";
+    ss << "      }\n";
+
+    ss << "      int next_state = yygoto[goto_index];\n";
+    ss << "      printf(\"GOTO表结果: [%d][%d] = %d\\n\", state_stack[top], nonterminal, next_state);\n";
+
+    ss << "      if (next_state == -1) {\n";
+    ss << "        printf(\"错误: GOTO表中没有对应项! 状态%d, 非终结符%d\\n\", state_stack[top], nonterminal);\n";
+    ss << "        yyerror(\"GOTO表错误\");\n";
+    ss << "        return 2;\n";
+    ss << "      }\n";
+
+    ss << "      /* 将新状态压入栈 */\n";
+    ss << "      state_stack[++top] = next_state;\n"; // 压入新状态
+    ss << "      state = next_state;\n";
+    ss << "      printf(\"规约后的新状态: %d\\n\", state);\n";
+    ss << "    } else { /* 接受 */\n";
+    ss << "      printf(\"接受输入, 分析成功完成!\\n\");\n";
+    ss << "      return 0;\n";
+    ss << "    }\n";
+    ss << "    printf(\"--------------------\\n\");\n"; // 分隔不同的状态转换
+    ss << "  }\n";
+    ss << "  printf(\"====== 语法分析结束 ======\\n\");\n";
+    ss << "}\n\n";
+
+    // 添加用户代码
+    if (!parser.program_code.empty()) {
+        ss << "/* 用户代码 */\n";
+        ss << parser.program_code << "\n";
+    }
+
+    return ss.str();
+}
+
 void LRGenerator::buildCanonicalCollection()
 {
     // 首先添加增广文法的起始项
@@ -851,14 +1196,11 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
     ss << "# define YYTOKENTYPE\n";
     ss << "  enum yytokentype\n";
     ss << "  {\n";
-    ss << "    YYEMPTY = -2,\n";
     ss << "    YYEOF = 0,                     /* \"文件结束\" */\n";
-    ss << "    YYerror = 256,                 /* 错误 */\n";
-    ss << "    YYUNDEF = 257,                 /* \"无效令牌\" */\n";
 
     // 获取所有终结符并按名称排序
     std::vector<Symbol> terminals = getSortedTerminals();
-    int tokenValue = 258; // 从258开始，前面已经使用了一些特殊值
+    int tokenValue = 1;
 
     // 添加终结符令牌定义（不包括$和ε）
     for (const auto& terminal : terminals) {
@@ -869,9 +1211,8 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
                 tokenName = "LITERAL_" + std::to_string(tokenValue);
             }
             ss << "    " << tokenName << " = " << tokenValue << ",";
-            // 添加可选注释
             if (terminal.type == ElementType::LITERAL) {
-                ss << "                 /* " << terminal.name << " */";
+                ss << " /* " << terminal.name << " */";
             }
             ss << "\n";
             tokenValue++;
@@ -884,12 +1225,9 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
 
     // 添加令牌定义宏
     ss << "/* 令牌定义宏 */\n";
-    ss << "#define YYEMPTY -2\n";
     ss << "#define YYEOF 0\n";
-    ss << "#define YYerror 256\n";
-    ss << "#define YYUNDEF 257\n";
 
-    tokenValue = 258;
+    tokenValue = 1;
     for (const auto& terminal : terminals) {
         if (terminal.name != "$" && terminal.name != "ε") {
             std::string tokenName = terminal.name;
