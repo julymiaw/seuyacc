@@ -232,7 +232,8 @@ void yyerror(const char *s);
 %token <ival> INTEGER_LITERAL
 %token <sval> IDENTIFIER STRING_LITERAL
 %token INT CHAR VOID MAIN PRINTF RETURN
-%token ADD SUB MUL DIV ASSIGN SEMICOLON LPAREN RPAREN LBRACE RBRACE COMMA
+/* %token ADD SUB MUL DIV ASSIGN SEMICOLON LPAREN RPAREN LBRACE RBRACE COMMA */
+%token SEMICOLON LBRACE RBRACE
 
 /* 定义各非终结符的类型 */
 %type <node> program main_function type_specifier compound_statement
@@ -240,9 +241,9 @@ void yyerror(const char *s);
 %type <node> init_declarator_list init_declarator initializer statement_list statement
 %type <node> expression_statement printf_statement return_statement expression
 
-%left ASSIGN  /* 最低优先级 */
-%left ADD SUB
-%left MUL DIV  /* 最高优先级 */
+%left '='  /* 最低优先级 */
+%left '+' '-'
+%left '*' '/'  /* 最高优先级 */
 
 %start program
 
@@ -257,7 +258,7 @@ program
     ;
 
 main_function
-    : type_specifier MAIN LPAREN RPAREN compound_statement {
+    : type_specifier MAIN '(' ')' compound_statement {
         $$ = create_node(AST_MAIN_FUNC, "main");
         add_child($$, $1);
         add_child($$, $5);
@@ -326,7 +327,7 @@ init_declarator_list
         $$ = create_node(AST_INIT_LIST, NULL);
         add_child($$, $1);
     }
-    | init_declarator_list COMMA init_declarator {
+    | init_declarator_list ',' init_declarator {
         $$ = $1;
         add_child($$, $3);
     }
@@ -337,7 +338,7 @@ init_declarator
         $$ = create_node(AST_INIT, NULL);
         add_child($$, create_node(AST_ID, $1));
     }
-    | IDENTIFIER ASSIGN initializer {
+    | IDENTIFIER '=' initializer {
         $$ = create_node(AST_INIT, NULL);
         add_child($$, create_node(AST_ID, $1));
         add_child($$, $3);
@@ -391,12 +392,12 @@ expression_statement
     ;
 
 printf_statement
-    : PRINTF LPAREN STRING_LITERAL COMMA expression RPAREN SEMICOLON {
+    : PRINTF '(' STRING_LITERAL ',' expression ')' SEMICOLON {
         $$ = create_node(AST_PRINTF_STMT, NULL);
         add_child($$, create_node(AST_STRING_LITERAL, $3));
         add_child($$, $5);
     }
-    | PRINTF LPAREN STRING_LITERAL RPAREN SEMICOLON {
+    | PRINTF '(' STRING_LITERAL ')' SEMICOLON {
         $$ = create_node(AST_PRINTF_STMT, NULL);
         add_child($$, create_node(AST_STRING_LITERAL, $3));
     }
@@ -423,42 +424,42 @@ expression
         $$ = create_node(AST_EXPR, NULL);
         add_child($$, create_node(AST_INT_LITERAL, buffer));
     }
-    | expression ADD expression {
+    | expression '+' expression {
         $$ = create_node(AST_EXPR, NULL);
         ASTNode* binary = create_node(AST_BINARY_EXPR, "+");
         add_child(binary, $1);
         add_child(binary, $3);
         add_child($$, binary);
     }
-    | expression SUB expression {
+    | expression '-' expression {
         $$ = create_node(AST_EXPR, NULL);
         ASTNode* binary = create_node(AST_BINARY_EXPR, "-");
         add_child(binary, $1);
         add_child(binary, $3);
         add_child($$, binary);
     }
-    | expression MUL expression {
+    | expression '*' expression {
         $$ = create_node(AST_EXPR, NULL);
         ASTNode* binary = create_node(AST_BINARY_EXPR, "*");
         add_child(binary, $1);
         add_child(binary, $3);
         add_child($$, binary);
     }
-    | expression DIV expression {
+    | expression '/' expression {
         $$ = create_node(AST_EXPR, NULL);
         ASTNode* binary = create_node(AST_BINARY_EXPR, "/");
         add_child(binary, $1);
         add_child(binary, $3);
         add_child($$, binary);
     }
-    | IDENTIFIER ASSIGN expression {
+    | IDENTIFIER '=' expression {
         $$ = create_node(AST_EXPR, NULL);
         ASTNode* assign = create_node(AST_ASSIGN_EXPR, "=");
         add_child(assign, create_node(AST_ID, $1));
         add_child(assign, $3);
         add_child($$, assign);
     }
-    | LPAREN expression RPAREN {
+    | '(' expression ')' {
         $$ = $2;
     }
     ;

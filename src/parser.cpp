@@ -282,20 +282,62 @@ void YaccParser::parseAssociativity(const std::string& line, Associativity assoc
         // 增加优先级计数
         current_precedence++;
 
-        // 分割符号列表
-        std::istringstream symbols_stream(symbols_str);
-        std::string symbol;
-        while (symbols_stream >> symbol) {
-            // 检查符号是否带有类型声明
-            std::string symbol_name = symbol;
-            std::string type_name = "";
+        // 分割符号列表，特殊处理单引号包裹的字面量
+        size_t pos = 0;
+        while (pos < symbols_str.size()) {
+            // 跳过空白
+            while (pos < symbols_str.size() && std::isspace(symbols_str[pos])) {
+                pos++;
+            }
+            if (pos >= symbols_str.size())
+                break;
 
-            // 处理带类型的符号，如 <type>symbol
-            std::regex typed_symbol_pattern("<([^>]+)>\\s*([^\\s]+)");
-            std::smatch type_matches;
-            if (std::regex_search(symbol, type_matches, typed_symbol_pattern)) {
-                type_name = type_matches[1];
-                symbol_name = type_matches[2];
+            std::string symbol_name;
+            std::string type_name = "";
+            bool is_literal = false;
+
+            // 检查是否为字面量（单引号包裹）
+            if (symbols_str[pos] == '\'') {
+                is_literal = true;
+                size_t start_pos = pos;
+                pos++; // 跳过开始的单引号
+
+                bool escaped = false;
+                while (pos < symbols_str.size()) {
+                    char c = symbols_str[pos];
+                    if (c == '\\' && !escaped) {
+                        escaped = true;
+                    } else if (c == '\'' && !escaped) {
+                        // 找到匹配的结束单引号
+                        pos++; // 跳过结束单引号
+                        symbol_name = symbols_str.substr(start_pos, pos - start_pos);
+                        break;
+                    } else {
+                        escaped = false;
+                    }
+                    pos++;
+                }
+                if (pos > symbols_str.size() || symbol_name.empty()) {
+                    std::cerr << "错误: 未闭合的字面量" << std::endl;
+                    continue;
+                }
+            } else {
+                // 处理普通符号或带类型的符号
+                std::string full_symbol;
+                // 读取完整符号（包括可能的类型声明）
+                while (pos < symbols_str.size() && !std::isspace(symbols_str[pos])) {
+                    full_symbol += symbols_str[pos++];
+                }
+
+                // 处理带类型的符号，如 <type>symbol
+                std::regex typed_symbol_pattern("<([^>]+)>\\s*([^\\s]+)");
+                std::smatch type_matches;
+                if (std::regex_search(full_symbol, type_matches, typed_symbol_pattern)) {
+                    type_name = type_matches[1];
+                    symbol_name = type_matches[2];
+                } else {
+                    symbol_name = full_symbol;
+                }
             }
 
             // 检查符号表中是否已存在该符号
@@ -303,9 +345,8 @@ void YaccParser::parseAssociativity(const std::string& line, Associativity assoc
                 // 如果符号已存在，更新其优先级和结合性
                 Symbol& existing_sym = symbol_table[symbol_name];
 
-                // 如果是非终结符，将其类型更改为终结符
-                // 因为在优先级和结合性声明中出现的符号必须是终结符
-                if (existing_sym.type == ElementType::NON_TERMINAL) {
+                // 如果是字面量，保持其LITERAL类型，否则设为TOKEN
+                if (!is_literal && existing_sym.type == ElementType::NON_TERMINAL) {
                     existing_sym.type = ElementType::TOKEN;
                 }
 
@@ -321,7 +362,7 @@ void YaccParser::parseAssociativity(const std::string& line, Associativity assoc
                 // 符号不存在，创建新的符号
                 Symbol sym;
                 sym.name = symbol_name;
-                sym.type = ElementType::TOKEN; // 操作符通常是终结符
+                sym.type = is_literal ? ElementType::LITERAL : ElementType::TOKEN;
                 sym.precedence = current_precedence;
                 sym.assoc = assoc;
                 if (!type_name.empty()) {
