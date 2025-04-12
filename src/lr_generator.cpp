@@ -506,6 +506,7 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
     }
 
     ss << "#include \"" << headerName << "\"\n";
+    ss << "#include <stdio.h> /* 包含标准输入输出库，因为使用了printf */\n";
 
     // 添加用户声明代码块
     if (!parser.declaration_code.empty()) {

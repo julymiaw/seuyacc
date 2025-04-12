@@ -11,6 +11,13 @@
 %token CASE DEFAULT IF ELSE SWITCH WHILE DO FOR GOTO CONTINUE BREAK RETURN
 
 %start translation_unit
+
+%{
+/* 前向声明以避免警告 */
+int yylex();
+void yyerror(const char *s);
+%}
+
 %%
 
 primary_expression
@@ -467,4 +474,15 @@ void yyerror(char const *s)
 {
 	fflush(stdout);
 	printf("\n%*s\n%*s\n", column, "^", column, s);
+}
+
+int main(void) {
+  // yydebug = 1; // 如果需要 Bison 的调试输出，取消注释此行
+  if (yyparse() == 0) {
+    printf("Parsing successful!\n");
+    return 0; // 成功
+  } else {
+    printf("Parsing failed.\n");
+    return 1; // 失败
+  }
 }

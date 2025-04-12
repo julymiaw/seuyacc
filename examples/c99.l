@@ -8,9 +8,12 @@ IS                      ((u|U)|(u|U)?(l|L|ll|LL)|(l|L|ll|LL)(u|U))
 
 %{
 #include <stdio.h>
-#include "y.tab.h"
+#include "c99.tab.h"
 
 void count(void);
+void comment(void);
+int check_type(void);
+void yyerror(const char *s);
 %}
 
 %%
@@ -141,7 +144,7 @@ void comment(void)
 			return;
 		prev = c;
 	}
-	error("unterminated comment");
+	yyerror("unterminated comment");
 }
 
 
