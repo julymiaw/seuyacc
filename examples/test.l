@@ -1,3 +1,12 @@
+DIGIT       [0-9]
+NONZERO     [1-9]
+LETTER      [a-zA-Z_]
+IDENTIFIER  {LETTER}({LETTER}|{DIGIT})*
+INTEGER     {NONZERO}{DIGIT}*|0
+WHITESPACE  [ \t\r\f]+
+NEWLINE     [\n]
+STRING      \"([^\"\n]|\\\")*\"
+
 %{
 #include "test.tab.h"
 #include <stdio.h>
@@ -9,15 +18,6 @@ int column = 0;
 %}
 
 %option noyywrap
-
-DIGIT       [0-9]
-NONZERO     [1-9]
-LETTER      [a-zA-Z_]
-IDENTIFIER  {LETTER}({LETTER}|{DIGIT})*
-INTEGER     {NONZERO}{DIGIT}*|0
-WHITESPACE  [ \t\r\f]+
-NEWLINE     [\n]
-STRING      \"([^\"\n]|\\\")*\"
 
 %%
 {WHITESPACE}  { column += yyleng; /* 忽略空白符 */ }

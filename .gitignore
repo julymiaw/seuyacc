@@ -15,3 +15,6 @@ examples/*.tab.c
 examples/*.tab.h
 examples/lex.yy.c
 examples/ast.dot
+
+报告/*
+
