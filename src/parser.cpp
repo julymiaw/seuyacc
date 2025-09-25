@@ -857,27 +857,26 @@ void YaccParser::printParsedInfo() const
 
     std::cout << "\n\n产生式规则 (" << productions.size() << "):" << std::endl;
     for (const auto& prod : productions) {
-        std::cout << prod.left.name << " [";
-        // 添加返回值信息
-        if (!prod.left.value_type.empty()) {
-            std::cout << prod.left.value_type;
+        std::cout << prod.left.name;
+        bool has_type = !prod.left.value_type.empty();
+        bool has_prec = prod.precedence > 0;
+        if (has_type || has_prec) {
+            std::cout << " [";
+            if (has_type)
+                std::cout << prod.left.value_type;
+            if (has_type && has_prec)
+                std::cout << ", ";
+            if (has_prec)
+                std::cout << "优先级:" << prod.precedence;
+            std::cout << "]";
         }
-
-        // 添加优先级信息
-        if (prod.precedence > 0) {
-            std::cout << ", 优先级:" << prod.precedence;
-        }
-
-        std::cout << "] -> ";
-
+        std::cout << " -> ";
         for (const auto& sym : prod.right) {
             std::cout << sym.name << " ";
         }
-
         if (!prod.semantic_action.empty()) {
             std::cout << prod.semantic_action;
         }
-
         std::cout << std::endl;
     }
 }
