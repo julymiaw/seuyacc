@@ -95,6 +95,10 @@ bool YaccParser::parseYaccFile(const std::string& filename)
         }
     }
 
+    // 为每个产生式分配唯一id
+    for (size_t i = 0; i < productions.size(); ++i) {
+        productions[i].id = static_cast<int>(i);
+    }
     // 验证符号
     validateSymbols();
     return true;

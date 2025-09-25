@@ -4,43 +4,17 @@ namespace seuyacc {
 
 bool LRItem::operator==(const LRItem& other) const
 {
-    // 比较产生式左部
-    if (!(prod.left == other.prod.left))
-        return false;
-
-    // 比较产生式右部
-    if (prod.right.size() != other.prod.right.size())
-        return false;
-
-    for (size_t i = 0; i < prod.right.size(); ++i) {
-        if (!(prod.right[i] == other.prod.right[i]))
-            return false;
-    }
-
-    // 比较点号位置和向前看符号
-    return dot_position == other.dot_position && (lookahead == other.lookahead);
+    // 只需比较产生式id、点号位置和lookahead
+    return prod.id == other.prod.id && dot_position == other.dot_position && lookahead == other.lookahead;
 }
 
 size_t LRItem::hash() const
 {
-    size_t h1 = std::hash<std::string> {}(prod.left.name);
+    // 只用产生式id、点号位置和lookahead做hash
+    size_t h1 = std::hash<int> {}(prod.id);
     size_t h2 = std::hash<int> {}(dot_position);
-    size_t h3 = std::hash<std::string> {}(lookahead.name);
-    size_t h4 = std::hash<int> {}(static_cast<int>(lookahead.type));
-
-    // 组合哈希值
-    size_t result = h1;
-    result = (result << 1) ^ h2;
-    result = (result << 1) ^ h3;
-    result = (result << 1) ^ h4;
-
-    // 添加产生式右部的哈希
-    for (const auto& symbol : prod.right) {
-        size_t symbolHash = std::hash<std::string> {}(symbol.name) ^ (std::hash<int> {}(static_cast<int>(symbol.type)) << 1);
-        result = (result << 1) ^ symbolHash;
-    }
-
-    return result;
+    size_t h3 = SymbolHasher {}(lookahead);
+    return ((h1 << 1) ^ h2) ^ (h3 << 2);
 }
 
 bool ItemSet::operator==(const ItemSet& other) const
