@@ -50,22 +50,15 @@ struct Symbol {
     }
 
     // 添加比较运算符
-
     bool operator==(const Symbol& other) const
     {
-        if (id != -1 && other.id != -1)
-            return id == other.id;
-        return name == other.name && type == other.type;
+        return id == other.id;
     }
 
     // 为map排序添加小于比较
     bool operator<(const Symbol& other) const
     {
-        if (id != -1 && other.id != -1)
-            return id < other.id;
-        if (name != other.name)
-            return name < other.name;
-        return static_cast<int>(type) < static_cast<int>(other.type);
+        return id < other.id;
     }
 };
 
@@ -73,9 +66,7 @@ struct Symbol {
 struct SymbolHasher {
     size_t operator()(const Symbol& symbol) const
     {
-        if (symbol.id != -1)
-            return std::hash<int> {}(symbol.id);
-        return std::hash<std::string> {}(symbol.name) ^ (std::hash<int> {}(static_cast<int>(symbol.type)) << 1);
+        return std::hash<int> {}(symbol.id);
     }
 };
 
