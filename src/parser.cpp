@@ -99,6 +99,20 @@ bool YaccParser::parseYaccFile(const std::string& filename)
     for (size_t i = 0; i < productions.size(); ++i) {
         productions[i].id = static_cast<int>(i);
     }
+
+    // 为每个符号分配唯一id（symbol_table、temp_symbols、defined_non_terminals）
+    int symbol_id = 0;
+    auto assign_id = [&symbol_id](auto& table) {
+        for (auto& kv : table) {
+            if (kv.second.id == -1) {
+                kv.second.id = symbol_id++;
+            }
+        }
+    };
+    assign_id(symbol_table);
+    assign_id(temp_symbols);
+    assign_id(defined_non_terminals);
+
     // 验证符号
     validateSymbols();
     return true;
