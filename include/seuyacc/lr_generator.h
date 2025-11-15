@@ -56,6 +56,12 @@ private:
     // 辅助方法：获取所有非终结符（按名称排序）
     std::vector<Symbol> getSortedNonTerminals() const;
 
+    // 计算词法返回的原始token值
+    std::vector<int> computeRawTokenValues(const std::vector<Symbol>& terminals) const;
+
+    // 解析字面量 token 的数值表示
+    int parseLiteralTokenValue(const std::string& literal) const;
+
     // 辅助方法：找到产生式的字符串表示
     std::string getProductionString(int index) const;
 

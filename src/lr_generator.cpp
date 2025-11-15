@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 
 namespace seuyacc {
 
@@ -32,6 +33,8 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirst(const Symbol&
     std::unordered_set<Symbol, SymbolHasher> result;
     first_cache[symbol] = result;
 
+    const Symbol& epsilon_symbol = parser.getSymbol("ε");
+
     // 终结符或字面量的FIRST集就是其自身
     if (symbol.type == ElementType::TOKEN || symbol.type == ElementType::LITERAL) {
         result.insert(symbol);
@@ -53,8 +56,7 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirst(const Symbol&
 
                 // 如果右部为空，添加空符号
                 if (prod.right.empty()) {
-                    Symbol epsilon = { "ε", ElementType::TOKEN };
-                    if (result.insert(epsilon).second) {
+                    if (result.insert(epsilon_symbol).second) {
                         changed = true;
                     }
                     continue;
@@ -75,8 +77,7 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirst(const Symbol&
                     auto firstOfRight = computeFirst(prod.right[i]);
 
                     // 检查是否可以推导出空
-                    Symbol epsilon = { "ε", ElementType::TOKEN };
-                    allCanDeriveEmpty = (firstOfRight.find(epsilon) != firstOfRight.end());
+                    allCanDeriveEmpty = (firstOfRight.find(epsilon_symbol) != firstOfRight.end());
 
                     // 将非空符号添加到结果
                     for (const auto& s : firstOfRight) {
@@ -93,8 +94,7 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirst(const Symbol&
 
                 // 如果右部所有符号都可以推导出空，则结果中添加空符号
                 if (allCanDeriveEmpty) {
-                    Symbol epsilon = { "ε", ElementType::TOKEN };
-                    if (result.insert(epsilon).second) {
+                    if (result.insert(epsilon_symbol).second) {
                         changed = true;
                     }
                 }
@@ -115,11 +115,11 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirst(const Symbol&
 std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirstOfSequence(const std::vector<Symbol>& sequence)
 {
     std::unordered_set<Symbol, SymbolHasher> result;
+    const Symbol& epsilon_symbol = parser.getSymbol("ε");
 
     if (sequence.empty()) {
         // 空序列的FIRST集包含ε
-        Symbol epsilon = { "ε", ElementType::TOKEN };
-        result.insert(epsilon);
+        result.insert(epsilon_symbol);
         return result;
     }
 
@@ -129,10 +129,9 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirstOfSequence(con
 
     // 如果序列还有更多符号且当前符号可能推导出空，则继续计算
     int i = 1;
-    Symbol epsilon = { "ε", ElementType::TOKEN };
-    while (i < sequence.size() && firstOfFirst.find(epsilon) != firstOfFirst.end()) {
+    while (i < sequence.size() && firstOfFirst.find(epsilon_symbol) != firstOfFirst.end()) {
         // 移除epsilon，因为它不会出现在FIRST(αβ)中，除非所有符号都能推导出空
-        result.erase(epsilon);
+        result.erase(epsilon_symbol);
 
         // 计算下一个符号的FIRST集
         firstOfFirst = computeFirst(sequence[i]);
@@ -407,22 +406,19 @@ ItemSet LRGenerator::computeGoto(const ItemSet& itemSet, const Symbol& symbol)
 
 void LRGenerator::addAugmentedProduction()
 {
-    // 创建一个新的开始符号 S'
-    Symbol newStart = { "S'", ElementType::NON_TERMINAL };
+    Symbol& newStart = parser.ensureSymbol("S'", ElementType::NON_TERMINAL);
 
-    // 创建增广产生式 S' -> S
     Production augmentedProd;
     augmentedProd.left = newStart;
 
-    // 添加原文法的开始符号作为右部
-    Symbol originalStart = { parser.start_symbol, ElementType::NON_TERMINAL };
+    Symbol& originalStart = parser.ensureSymbol(parser.start_symbol, ElementType::NON_TERMINAL);
     augmentedProd.right.push_back(originalStart);
 
-    // 创建终止符号 $
-    Symbol endSymbol = { "$", ElementType::TOKEN };
-
-    // 将增广产生式添加到产生式列表的开头
     parser.productions.insert(parser.productions.begin(), augmentedProd);
+
+    for (size_t i = 0; i < parser.productions.size(); ++i) {
+        parser.productions[i].id = static_cast<int>(i);
+    }
 }
 
 // 处理语义动作中的 $$ 和 $N 替换
@@ -516,6 +512,19 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
 
     std::vector<Symbol> terminals = getSortedTerminals();
     std::vector<Symbol> nonTerminals = getSortedNonTerminals();
+    std::vector<int> rawTokenValues = computeRawTokenValues(terminals);
+
+    int yymaxutok = 0;
+    for (int value : rawTokenValues) {
+        if (value > yymaxutok) {
+            yymaxutok = value;
+        }
+    }
+
+    std::vector<int> translateTable(yymaxutok + 1, -1);
+    for (size_t i = 0; i < rawTokenValues.size(); ++i) {
+        translateTable[rawTokenValues[i]] = static_cast<int>(i);
+    }
 
     // 添加全局变量定义
     ss << "/* 全局变量定义 */\n";
@@ -532,7 +541,28 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
     ss << "#define YYNTOKENS " << terminals.size() << "\n";
     ss << "#define YYNNTS " << nonTerminals.size() << "\n";
     ss << "#define YYNRULES " << parser.productions.size() << "\n";
-    ss << "#define YYNSTATES " << canonical_collection.size() << "\n\n";
+    ss << "#define YYNSTATES " << canonical_collection.size() << "\n";
+    ss << "#define YYMAXUTOK " << yymaxutok << "\n";
+    ss << "#define YYUNDEF -1\n\n";
+
+    ss << "static const short yytranslate_table[" << (yymaxutok + 1) << "] = {\n  ";
+    for (int i = 0; i <= yymaxutok; ++i) {
+        ss << translateTable[i];
+        if (i != yymaxutok) {
+            ss << ", ";
+        }
+        if ((i + 1) % 16 == 0 && i != yymaxutok) {
+            ss << "\n  ";
+        }
+    }
+    ss << "\n};\n\n";
+
+    ss << "static inline int yytranslate_token(int token) {\n";
+    ss << "  if (token < 0 || token > YYMAXUTOK) {\n";
+    ss << "    return YYUNDEF;\n";
+    ss << "  }\n";
+    ss << "  return yytranslate_table[token];\n";
+    ss << "}\n\n";
 
     // 添加动作和状态转移表
     ss << "/* 解析表 */\n";
@@ -690,6 +720,7 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
     ss << "int yyparse(void) {\n";
     ss << "  int state = 0;\n";
     ss << "  int top = 0;\n";
+    ss << "  int token_raw;\n";
     ss << "  int token;\n";
     ss << "  int action;\n";
     ss << "  YYSTYPE stack[YYMAXDEPTH];\n";
@@ -697,13 +728,20 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
 
     ss << "  printf(\"====== 开始语法分析 ======\\n\");\n";
     ss << "  state_stack[0] = 0;\n";
-    ss << "  token = yylex();\n";
-    ss << "  printf(\"获取首个token: %d\\n\", token);\n\n";
+    ss << "  token_raw = yylex();\n";
+    ss << "  token = yytranslate_token(token_raw);\n";
+    ss << "  printf(\"获取首个token: raw=%d, translated=%d\\n\", token_raw, token);\n\n";
 
     ss << "  while (1) {\n";
-    ss << "    printf(\"当前状态: %d, token: %d\\n\", state, token);\n";
+    ss << "    printf(\"当前状态: %d, token(raw)=%d, token(translated)=%d\\n\", state, token_raw, token);\n";
+    ss << "    if (token == YYUNDEF) {\n";
+    ss << "      printf(\"检测到未定义的token: %d\\n\", token_raw);\n";
+    ss << "      yyerror(\"无法识别的终结符\");\n";
+    ss << "      return 1;\n";
+    ss << "    }\n\n";
+
     ss << "    action = yytable[state * YYNTOKENS + token];\n\n";
-    ss << "    printf(\"查找动作: yytable[%d * %d + %d] = %d\\n\", state, YYNTOKENS, token, action);\n\n";
+    ss << "    printf(\"查找动作: yytable[%d * %d + %d] = %d (raw token %d)\\n\", state, YYNTOKENS, token, action, token_raw);\n\n";
 
     ss << "    if (action == -32767) { /* 错误 */\n";
     ss << "      yyerror(\"语法错误\");\n";
@@ -715,8 +753,12 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
     ss << "      stack[++top] = yylval;\n";
     ss << "      state_stack[top] = action;\n"; // 存储新状态
     ss << "      state = action;\n";
-    ss << "      token = yylex();\n";
-    ss << "      printf(\"获取下一个token: %d\\n\", token);\n";
+    ss << "      int next_raw = yylex();\n";
+    ss << "      int next_token = yytranslate_token(next_raw);\n";
+    ss << "      printf(\"获取下一个token: raw=%d\\n\", next_raw);\n";
+    ss << "      printf(\"转换token结果: %d -> %d\\n\", next_raw, next_token);\n";
+    ss << "      token_raw = next_raw;\n";
+    ss << "      token = next_token;\n";
     ss << "    } else if (action < 0) { /* 规约 */\n";
     ss << "      int rule = -action - 1;\n";
     ss << "      printf(\"执行规约操作: 使用规则%d\\n\", rule);\n";
@@ -784,9 +826,9 @@ void LRGenerator::buildCanonicalCollection()
     // 创建初始项集
     ItemSet initialItemSet;
     LRItem initialItem = {
-        parser.productions[0], // 增广文法的第一条产生式
-        0, // 点号位置在最左边
-        { "$", ElementType::TOKEN } // 向前看符号为终止符
+        parser.productions[0],
+        0,
+        parser.getSymbol("$")
     };
     initialItemSet.items.push_back(initialItem);
     initialItemSet.state_id = 0;
@@ -911,66 +953,25 @@ std::string LRGenerator::toPlantUML() const
     return ss.str();
 }
 
-// 获取所有终结符（按ASCII顺序排序，预留前256个位置）
+// 获取所有终结符（按照符号id排序）
 std::vector<Symbol> LRGenerator::getSortedTerminals() const
 {
     std::vector<Symbol> terminals;
 
-    // 首先添加EOF符号$，作为终结符的第一个（索引0）
-    Symbol endSymbol = { "$", ElementType::TOKEN };
-    terminals.push_back(endSymbol);
+    terminals.push_back(parser.getSymbol("$"));
 
-    // 添加256个ASCII字符作为字面量（索引1-256）
-    for (int i = 1; i <= 256; i++) {
-        std::string charName = "'";
-        char c = static_cast<char>(i);
-
-        // 处理特殊字符，避免显示问题
-        if (c == '\n')
-            charName += "\\n";
-        else if (c == '\r')
-            charName += "\\r";
-        else if (c == '\t')
-            charName += "\\t";
-        else if (c == '\'')
-            charName += "\\'";
-        else if (c == '\\')
-            charName += "\\\\";
-        else if (isprint(c))
-            charName += c;
-        else
-            charName += "\\x" + std::to_string(i);
-
-        charName += "'";
-
-        // 查看符号表中是否有该字面量
-        Symbol literal = { charName, ElementType::LITERAL };
-        auto it = parser.symbol_table.find(charName);
-        if (it != parser.symbol_table.end()) {
-            // 使用符号表中的定义但保持类型为LITERAL
-            literal = it->second;
-            literal.type = ElementType::LITERAL;
-        }
-
-        terminals.push_back(literal);
-    }
-
-    // 最后添加其他TOKEN类型的终结符（索引从256开始）
     for (const auto& [name, symbol] : parser.symbol_table) {
-        if (symbol.type == ElementType::TOKEN && name != "$" && name != "ε") {
-            // 检查是否已经添加过（避免重复）
-            bool alreadyAdded = false;
-            for (const auto& term : terminals) {
-                if (term.name == symbol.name) {
-                    alreadyAdded = true;
-                    break;
-                }
-            }
-            if (!alreadyAdded) {
-                terminals.push_back(symbol);
-            }
+        if (name == "$" || name == "ε") {
+            continue;
+        }
+        if (symbol.type == ElementType::TOKEN || symbol.type == ElementType::LITERAL) {
+            terminals.push_back(symbol);
         }
     }
+
+    std::sort(terminals.begin() + 1, terminals.end(), [](const Symbol& a, const Symbol& b) {
+        return a.id < b.id;
+    });
 
     return terminals;
 }
@@ -992,6 +993,126 @@ std::vector<Symbol> LRGenerator::getSortedNonTerminals() const
     });
 
     return nonTerminals;
+}
+
+std::vector<int> LRGenerator::computeRawTokenValues(const std::vector<Symbol>& terminals) const
+{
+    std::vector<int> values(terminals.size(), 0);
+    int nextTokenValue = 256;
+
+    for (size_t i = 0; i < terminals.size(); ++i) {
+        const Symbol& sym = terminals[i];
+
+        if (i == 0) {
+            values[i] = 0; // $ 对应 EOF
+            continue;
+        }
+
+        if (sym.type == ElementType::LITERAL) {
+            values[i] = parseLiteralTokenValue(sym.name);
+        } else {
+            values[i] = nextTokenValue++;
+        }
+    }
+
+    return values;
+}
+
+int LRGenerator::parseLiteralTokenValue(const std::string& literal) const
+{
+    if (literal.size() < 2 || literal.front() != '\'' || literal.back() != '\'') {
+        throw std::runtime_error("无效的字面量符号: " + literal);
+    }
+
+    std::string content = literal.substr(1, literal.size() - 2);
+    if (content.empty()) {
+        throw std::runtime_error("空的字面量符号: " + literal);
+    }
+
+    auto parseEscape = [](const std::string& str, size_t& pos) -> unsigned char {
+        auto toHex = [](char ch) -> int {
+            if (ch >= '0' && ch <= '9') {
+                return ch - '0';
+            }
+            if (ch >= 'a' && ch <= 'f') {
+                return 10 + (ch - 'a');
+            }
+            if (ch >= 'A' && ch <= 'F') {
+                return 10 + (ch - 'A');
+            }
+            return -1;
+        };
+
+        if (str[pos] != '\\') {
+            return static_cast<unsigned char>(str[pos++]);
+        }
+
+        pos++; // 跳过反斜杠
+        if (pos >= str.size()) {
+            throw std::runtime_error("不完整的转义序列");
+        }
+
+        char esc = str[pos++];
+        switch (esc) {
+        case '\\':
+            return '\\';
+        case '\'':
+            return '\'';
+        case '"':
+            return '"';
+        case 'n':
+            return '\n';
+        case 't':
+            return '\t';
+        case 'r':
+            return '\r';
+        case '0':
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7': {
+            int value = esc - '0';
+            int count = 1;
+            while (count < 3 && pos < str.size() && str[pos] >= '0' && str[pos] <= '7') {
+                value = (value << 3) + (str[pos++] - '0');
+                count++;
+            }
+            return static_cast<unsigned char>(value);
+        }
+        case 'x':
+        case 'X': {
+            int value = 0;
+            int digits = 0;
+            while (pos < str.size()) {
+                int hex = toHex(str[pos]);
+                if (hex < 0) {
+                    break;
+                }
+                value = (value << 4) + hex;
+                pos++;
+                digits++;
+            }
+            if (digits == 0) {
+                throw std::runtime_error("\\x 后缺少十六进制数字");
+            }
+            return static_cast<unsigned char>(value);
+        }
+        default:
+            return static_cast<unsigned char>(esc);
+        }
+    };
+
+    size_t pos = 0;
+    int value = 0;
+    while (pos < content.size()) {
+        unsigned char ch = parseEscape(content, pos);
+        value = (value << 8) | ch;
+    }
+
+    return value;
 }
 
 // 将ActionEntry转换为可读字符串
@@ -1069,9 +1190,20 @@ std::string LRGenerator::toMarkdownTable() const
     ss << "## 基本信息\n\n";
     ss << "- 状态数量: " << canonical_collection.size() << "\n";
     ss << "- 终结符数量: " << terminals.size() - 1 << " (不含 $)\n";
-    ss << "- 其中字面量数量: " << 255 << "\n";
-    ss << "- 其中Token数量: " << (terminals.size() - 256) << "\n";
-    ss << "- 非终结符数量: " << getSortedNonTerminals().size() << "\n";
+
+    int literalCount = 0;
+    int namedTokenCount = 0;
+    for (size_t i = 1; i < terminals.size(); ++i) {
+        if (terminals[i].type == ElementType::LITERAL) {
+            literalCount++;
+        } else {
+            namedTokenCount++;
+        }
+    }
+
+    ss << "- 其中字面量数量: " << literalCount << "\n";
+    ss << "- 其中Token数量: " << namedTokenCount << "\n";
+    ss << "- 非终结符数量: " << nonTerminals.size() << "\n";
     ss << "- 产生式数量: " << parser.productions.size() << "\n\n";
 
     // 列出所有产生式
@@ -1271,23 +1403,17 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
 
     // 获取所有终结符并按名称排序
     std::vector<Symbol> terminals = getSortedTerminals();
-    int tokenValue = 1;
+    std::vector<int> rawValues = computeRawTokenValues(terminals);
 
     // 添加终结符令牌定义（不包括$和ε）
-    for (const auto& terminal : terminals) {
-        if (terminal.name != "$" && terminal.name != "ε") {
-            std::string tokenName = terminal.name;
-            // 如果是字面量，转换为有效的C标识符
-            if (terminal.type == ElementType::LITERAL) {
-                tokenValue++;
-                continue;
-            }
-            ss << "    " << tokenName << " = " << tokenValue << ",";
-            if (terminal.type == ElementType::LITERAL) {
-                ss << " /* " << terminal.name << " */";
-            }
-            ss << "\n";
-            tokenValue++;
+    for (size_t i = 1; i < terminals.size(); ++i) {
+        const Symbol& terminal = terminals[i];
+        if (terminal.name == "ε") {
+            continue;
+        }
+
+        if (terminal.type == ElementType::TOKEN) {
+            ss << "    " << terminal.name << " = " << rawValues[i] << ",\n";
         }
     }
 
@@ -1298,17 +1424,12 @@ std::string LRGenerator::generateHeaderFile(const std::string& filename) const
     ss << "/* 令牌定义宏 */\n";
     ss << "#define YYEOF 0\n";
 
-    tokenValue = 1;
-    for (const auto& terminal : terminals) {
-        if (terminal.name != "$" && terminal.name != "ε") {
-            std::string tokenName = terminal.name;
-            if (terminal.type == ElementType::LITERAL) {
-                tokenValue++;
-                continue; // 跳过字面量
-            }
-            ss << "#define " << tokenName << " " << tokenValue << "\n";
-            tokenValue++;
+    for (size_t i = 1; i < terminals.size(); ++i) {
+        const Symbol& terminal = terminals[i];
+        if (terminal.type != ElementType::TOKEN || terminal.name == "ε") {
+            continue;
         }
+        ss << "#define " << terminal.name << " " << rawValues[i] << "\n";
     }
     ss << "\n";
 

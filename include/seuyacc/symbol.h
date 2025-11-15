@@ -2,6 +2,7 @@
 #define SEUYACC_SYMBOL_H
 
 #include <functional>
+#include <stdexcept>
 #include <string>
 
 namespace seuyacc {
@@ -52,13 +53,25 @@ struct Symbol {
     // 添加比较运算符
     bool operator==(const Symbol& other) const
     {
+        ensureIdAssigned(*this, "Symbol::operator==");
+        ensureIdAssigned(other, "Symbol::operator==");
         return id == other.id;
     }
 
     // 为map排序添加小于比较
     bool operator<(const Symbol& other) const
     {
+        ensureIdAssigned(*this, "Symbol::operator<");
+        ensureIdAssigned(other, "Symbol::operator<");
         return id < other.id;
+    }
+
+    static void ensureIdAssigned(const Symbol& sym, const char* context)
+    {
+        if (sym.id == -1) {
+            const std::string symbolName = sym.name.empty() ? std::string("<anonymous symbol>") : sym.name;
+            throw std::runtime_error("Symbol '" + symbolName + "' used in " + context + " before id was assigned");
+        }
     }
 };
 
@@ -66,6 +79,7 @@ struct Symbol {
 struct SymbolHasher {
     size_t operator()(const Symbol& symbol) const
     {
+        Symbol::ensureIdAssigned(symbol, "SymbolHasher::operator()");
         return std::hash<int> {}(symbol.id);
     }
 };

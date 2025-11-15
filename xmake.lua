@@ -1,5 +1,6 @@
 add_rules("mode.debug", "mode.release")
 
+add_rules("plugin.compile_commands.autoupdate", {outputdir = ".vscode"})
 target("seuyacc")
     set_kind("binary")
     set_languages("c++17")
@@ -8,7 +9,7 @@ target("seuyacc")
 
     after_build(function (target)
         import("core.project.config")
-        local outputdir = path.join(config.buildir(), config.plat(), config.arch(), config.mode())
+        local outputdir = path.join(config.builddir(), config.plat(), config.arch(), config.mode())
         local targetfile = target:targetfile()
         
         -- 获取项目根目录

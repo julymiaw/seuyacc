@@ -15,6 +15,7 @@ public:
     // 构造函数
     YaccParser()
         : current_precedence(0)
+        , next_symbol_id(0)
     {
     }
 
@@ -42,6 +43,10 @@ public:
     // 打印解析结果
     void printParsedInfo() const;
 
+    // 获取或创建符号，确保已分配唯一id
+    Symbol& ensureSymbol(const std::string& name, ElementType type);
+    const Symbol& getSymbol(const std::string& name) const;
+
 private:
     // 定义部分处理函数
     void parseTokenSection(const std::string& line);
@@ -67,9 +72,12 @@ private:
     void skipWhitespaceAndComments(std::string& buffer, size_t& pos);
     bool checkChar(std::string& buffer, size_t pos, char expected);
     void validateSymbols();
+    void synchronizeProductionSymbols();
+    const Symbol& resolveSymbol(const Symbol& symbol) const;
 
     // 当前最大优先级
     int current_precedence;
+    int next_symbol_id;
 
     // 用于规则验证阶段
     std::unordered_map<std::string, Symbol> temp_symbols; // 存储解析规则阶段遇到的临时符号如字面量

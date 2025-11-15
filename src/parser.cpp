@@ -1,9 +1,11 @@
 #include "seuyacc/parser.h"
+#include <algorithm>
 #include <cassert>
 #include <fstream>
 #include <iostream>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
 
 namespace seuyacc {
 
@@ -100,21 +102,28 @@ bool YaccParser::parseYaccFile(const std::string& filename)
         productions[i].id = static_cast<int>(i);
     }
 
-    // 为每个符号分配唯一id（symbol_table、temp_symbols、defined_non_terminals）
-    int symbol_id = 0;
-    auto assign_id = [&symbol_id](auto& table) {
+    // 验证符号并分配唯一id
+    validateSymbols();
+
+    next_symbol_id = 0;
+    auto assign_id = [this](auto& table) {
         for (auto& kv : table) {
             if (kv.second.id == -1) {
-                kv.second.id = symbol_id++;
+                kv.second.id = next_symbol_id++;
+            } else {
+                next_symbol_id = std::max(next_symbol_id, kv.second.id + 1);
             }
         }
     };
+
     assign_id(symbol_table);
     assign_id(temp_symbols);
     assign_id(defined_non_terminals);
 
-    // 验证符号
-    validateSymbols();
+    ensureSymbol("$", ElementType::TOKEN);
+    ensureSymbol("ε", ElementType::TOKEN);
+
+    synchronizeProductionSymbols();
     return true;
 }
 
@@ -836,6 +845,55 @@ void YaccParser::validateSymbols()
             symbol_table[name].value_type = symbol.value_type;
         }
     }
+}
+
+void YaccParser::synchronizeProductionSymbols()
+{
+    for (auto& prod : productions) {
+        prod.left = resolveSymbol(prod.left);
+        for (auto& sym : prod.right) {
+            sym = resolveSymbol(sym);
+        }
+    }
+}
+
+const Symbol& YaccParser::resolveSymbol(const Symbol& symbol) const
+{
+    auto it = symbol_table.find(symbol.name);
+    if (it == symbol_table.end()) {
+        throw std::runtime_error("未在符号表中找到符号: " + symbol.name);
+    }
+    return it->second;
+}
+
+Symbol& YaccParser::ensureSymbol(const std::string& name, ElementType type)
+{
+    auto it = symbol_table.find(name);
+    if (it == symbol_table.end()) {
+        Symbol sym;
+        sym.name = name;
+        sym.type = type;
+        sym.id = next_symbol_id++;
+        sym.precedence = 0;
+        sym.assoc = Associativity::NONE;
+        auto [inserted_it, _] = symbol_table.emplace(name, sym);
+        return inserted_it->second;
+    }
+
+    if (it->second.id == -1) {
+        it->second.id = next_symbol_id++;
+    }
+
+    return it->second;
+}
+
+const Symbol& YaccParser::getSymbol(const std::string& name) const
+{
+    auto it = symbol_table.find(name);
+    if (it == symbol_table.end()) {
+        throw std::runtime_error("未在符号表中找到符号: " + name);
+    }
+    return it->second;
 }
 
 void YaccParser::printParsedInfo() const
