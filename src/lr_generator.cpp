@@ -1,5 +1,6 @@
 #include "seuyacc/lr_generator.h"
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -14,6 +15,12 @@ LRGenerator::LRGenerator(const YaccParser& p)
 
 void LRGenerator::generateTable()
 {
+    first_cache.clear();
+    canonical_collection.clear();
+    transitions.clear();
+    action_table.clear();
+    goto_table.clear();
+
     // 构建规范项集族
     buildCanonicalCollection();
 
@@ -42,68 +49,69 @@ std::unordered_set<Symbol, SymbolHasher> LRGenerator::computeFirst(const Symbol&
         return result;
     }
 
-    // 对非终结符，查找所有以该非终结符为左部的产生式
-    int matchCount = 0;
+    Symbol::ensureIdAssigned(symbol, "LRGenerator::computeFirst");
+
+    std::vector<const Production*> candidates;
+    candidates.reserve(8);
+    for (const auto& prod : parser.productions) {
+        if (prod.left.id == symbol.id) {
+            candidates.push_back(&prod);
+        }
+    }
+
+    if (candidates.empty()) {
+        std::cout << "  警告: 没有找到非终结符 " << symbol.name << " 的产生式!" << std::endl;
+        first_cache[symbol] = result;
+        return result;
+    }
     bool changed = true;
 
     // 使用固定点算法：不断扩展结果，直到不再变化
     while (changed) {
         changed = false;
-        // 对非终结符，查找所有以该非终结符为左部的产生式
-        for (const Production& prod : parser.productions) {
-            if (prod.left.name == symbol.name) {
-                matchCount++;
+        for (const auto* prodPtr : candidates) {
+            const Production& prod = *prodPtr;
 
-                // 如果右部为空，添加空符号
-                if (prod.right.empty()) {
-                    if (result.insert(epsilon_symbol).second) {
-                        changed = true;
-                    }
+            // 如果右部为空，添加空符号
+            if (prod.right.empty()) {
+                if (result.insert(epsilon_symbol).second) {
+                    changed = true;
+                }
+                continue;
+            }
+
+            int i = 0;
+            bool allCanDeriveEmpty = true;
+
+            while (i < static_cast<int>(prod.right.size()) && allCanDeriveEmpty) {
+                const Symbol& current = prod.right[i];
+
+                // 如果右部第i个符号就是正在计算的符号，则跳过
+                if (current.name == symbol.name && current.type == symbol.type) {
+                    i++;
                     continue;
                 }
 
-                // 处理右部第一个符号
-                int i = 0;
-                bool allCanDeriveEmpty = true;
+                auto firstOfRight = computeFirst(current);
+                allCanDeriveEmpty = (firstOfRight.find(epsilon_symbol) != firstOfRight.end());
 
-                while (i < prod.right.size() && allCanDeriveEmpty) {
-                    // 如果右部第i个符号就是正在计算的符号，则跳过
-                    if (prod.right[i].name == symbol.name && prod.right[i].type == symbol.type) {
-                        i++;
-                        continue;
-                    }
-
-                    // 计算右部第i个符号的FIRST集
-                    auto firstOfRight = computeFirst(prod.right[i]);
-
-                    // 检查是否可以推导出空
-                    allCanDeriveEmpty = (firstOfRight.find(epsilon_symbol) != firstOfRight.end());
-
-                    // 将非空符号添加到结果
-                    for (const auto& s : firstOfRight) {
-                        if (s.name != "ε" && result.insert(s).second) {
-                            changed = true;
-                        }
-                    }
-
-                    if (!allCanDeriveEmpty) {
-                        break;
-                    }
-                    i++;
-                }
-
-                // 如果右部所有符号都可以推导出空，则结果中添加空符号
-                if (allCanDeriveEmpty) {
-                    if (result.insert(epsilon_symbol).second) {
+                for (const auto& s : firstOfRight) {
+                    if (s.name != "ε" && result.insert(s).second) {
                         changed = true;
                     }
                 }
+
+                i++;
+            }
+
+            if (!allCanDeriveEmpty) {
+                continue;
+            }
+
+            if (result.insert(epsilon_symbol).second) {
+                changed = true;
             }
         }
-    }
-
-    if (matchCount == 0) {
-        std::cout << "  警告: 没有找到非终结符 " << symbol.name << " 的产生式!" << std::endl;
     }
 
     // 更新缓存
@@ -149,171 +157,212 @@ void LRGenerator::buildActionGotoTable()
     int reduce_reduce_conflicts = 0;
     int resolved_rr_conflicts = 0;
 
-    // 从项集规范族构建ACTION和GOTO表
     for (const ItemSet& state : canonical_collection) {
-        int stateId = state.state_id;
+        const int stateId = state.state_id;
 
-        // 先处理所有规约项
         for (const LRItem& item : state.items) {
-            // 如果点号在最右边，这是一个规约项
-            if (item.dot_position == item.prod.right.size()) {
-                // 特殊处理增广产生式 S' -> S·
-                if (item.prod.left.name == "S'" && item.lookahead.name == "$") {
-                    // 接受动作 - 优先级最高，不会有冲突
-                    action_table[stateId][item.lookahead] = { ActionType::ACCEPT, 0 };
-                } else {
-                    // 规约动作，找出产生式在原文法中的索引
-                    int prodIndex = 0;
-                    for (size_t i = 0; i < parser.productions.size(); ++i) {
-                        if (parser.productions[i].left.name == item.prod.left.name && parser.productions[i].right == item.prod.right) {
-                            prodIndex = i;
-                            break;
-                        }
-                    }
-
-                    // 检查是否已经有针对该符号的动作
-                    if (action_table[stateId].find(item.lookahead) != action_table[stateId].end()) {
-                        ActionEntry existing = action_table[stateId][item.lookahead];
-
-                        if (existing.type == ActionType::REDUCE) {
-                            // 规约/规约冲突
-                            reduce_reduce_conflicts++;
-
-                            // 获取两个产生式
-                            const Production& currentProd = parser.productions[prodIndex];
-                            const Production& existingProd = parser.productions[existing.value];
-
-                            // 检查是否可以用优先级解决
-                            bool resolved = false;
-
-                            // 如果两个产生式都有优先级，使用优先级高的
-                            if (currentProd.precedence > 0 && existingProd.precedence > 0) {
-                                if (currentProd.precedence > existingProd.precedence) {
-                                    action_table[stateId][item.lookahead] = { ActionType::REDUCE, prodIndex };
-                                    resolved = true;
-                                } else if (currentProd.precedence < existingProd.precedence) {
-                                    // 保留现有的动作
-                                    resolved = true;
-                                }
-                                // 优先级相同的情况下，保留在文法中先出现的产生式
-                            }
-
-                            if (resolved) {
-                                resolved_rr_conflicts++;
-                            } else {
-                                std::cout << "规约/规约冲突: 状态 " << stateId
-                                          << ", 符号 " << item.lookahead.name
-                                          << ", 产生式 " << prodIndex << " 和产生式 " << existing.value << std::endl;
-
-                                // 默认策略：选择在文法中较早出现的产生式
-                                if (prodIndex < existing.value) {
-                                    action_table[stateId][item.lookahead] = { ActionType::REDUCE, prodIndex };
-                                }
-                            }
-                        }
-                        // 这里不处理移入/规约冲突，因为处理规约项时不可能已经有移入项
-                        // 移入/规约冲突在处理移入项时检测
-                    } else {
-                        // 没有冲突，添加规约动作
-                        action_table[stateId][item.lookahead] = { ActionType::REDUCE, prodIndex };
-                    }
-                }
+            if (isReduceItem(item)) {
+                applyReduceAction(stateId, item, reduce_reduce_conflicts, resolved_rr_conflicts);
             }
         }
 
-        // 然后处理所有移入项（即从该状态出发的转移）
         for (const StateTransition& transition : transitions) {
-            if (transition.from_state == stateId) {
-                if (transition.symbol.type != ElementType::NON_TERMINAL) {
-                    // 终结符转移对应移入动作
+            if (transition.from_state != stateId) {
+                continue;
+            }
 
-                    // 检查是否已经有针对该符号的规约动作
-                    if (action_table[stateId].find(transition.symbol) != action_table[stateId].end()) {
-                        ActionEntry existing = action_table[stateId][transition.symbol];
-
-                        if (existing.type == ActionType::REDUCE) {
-                            // 移入/规约冲突
-                            shift_reduce_conflicts++;
-
-                            // 获取产生式和向前看符号的信息
-                            const Production& reduceProd = parser.productions[existing.value];
-                            const Symbol& lookAhead = transition.symbol;
-
-                            // 检查是否可以用优先级和结合性解决
-                            bool resolved = false;
-
-                            // 如果产生式有优先级并且冲突符号也有优先级
-                            if (reduceProd.precedence > 0 && parser.symbol_table.find(lookAhead.name) != parser.symbol_table.end() && parser.symbol_table.at(lookAhead.name).precedence > 0) {
-
-                                const Symbol& conflictSymbol = parser.symbol_table.at(lookAhead.name);
-
-                                // 比较优先级
-                                if (reduceProd.precedence > conflictSymbol.precedence) {
-                                    // 规约的优先级更高，选择规约（保留规约动作）
-                                    resolved = true;
-                                } else if (reduceProd.precedence < conflictSymbol.precedence) {
-                                    // 移入的优先级更高，选择移入
-                                    action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
-                                    resolved = true;
-                                } else {
-                                    // 优先级相同，使用结合性决定
-                                    switch (conflictSymbol.assoc) {
-                                    case Associativity::LEFT:
-                                        // 左结合，选择规约（保留规约动作）
-                                        resolved = true;
-                                        break;
-                                    case Associativity::RIGHT:
-                                        // 右结合，选择移入
-                                        action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
-                                        resolved = true;
-                                        break;
-                                    case Associativity::NONASSOC:
-                                        // 无结合性，报错
-                                        action_table[stateId][transition.symbol] = { ActionType::ERROR, 0 };
-                                        resolved = true;
-                                        std::cout << "无结合性操作符 (报错): 状态 " << stateId
-                                                  << ", 符号 " << lookAhead.name << std::endl;
-                                        break;
-                                    default:
-                                        // 无结合性信息
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (resolved) {
-                                resolved_sr_conflicts++;
-                            } else {
-                                std::cout << "移入/规约冲突: 状态 " << stateId
-                                          << ", 符号 " << transition.symbol.name
-                                          << ", 移入到状态 " << transition.to_state
-                                          << " 或规约产生式 " << existing.value << std::endl;
-
-                                // 默认策略：选择移入
-                                action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
-                            }
-                        }
-                        // 不应该已经有SHIFT或ACCEPT
-                    } else {
-                        // 没有冲突，添加移入动作
-                        action_table[stateId][transition.symbol] = { ActionType::SHIFT, transition.to_state };
-                    }
-                } else {
-                    // 非终结符转移对应GOTO表项
-                    goto_table[stateId][transition.symbol] = transition.to_state;
-                }
+            if (transition.symbol.type == ElementType::NON_TERMINAL) {
+                goto_table[stateId][transition.symbol] = transition.to_state;
+            } else {
+                applyShiftAction(stateId, transition, shift_reduce_conflicts, resolved_sr_conflicts);
             }
         }
     }
 
-    // 报告冲突总数
+    reportConflictStats(shift_reduce_conflicts, resolved_sr_conflicts, reduce_reduce_conflicts, resolved_rr_conflicts);
+}
+
+bool LRGenerator::isReduceItem(const LRItem& item) const
+{
+    return item.dot_position >= static_cast<int>(item.prod.right.size());
+}
+
+int LRGenerator::productionIndexOf(const LRItem& item) const
+{
+    const int candidateId = item.prod.id;
+    if (candidateId >= 0 && candidateId < static_cast<int>(parser.productions.size())) {
+        const Production& candidate = parser.productions[candidateId];
+        if (candidate.left.name == item.prod.left.name && candidate.right == item.prod.right) {
+            return candidateId;
+        }
+    }
+
+    for (size_t i = 0; i < parser.productions.size(); ++i) {
+        const Production& prod = parser.productions[i];
+        if (prod.left.name == item.prod.left.name && prod.right == item.prod.right) {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
+}
+
+bool LRGenerator::resolveReduceReduceConflict(int newProdIndex, ActionEntry& existingEntry, int& resolvedCount) const
+{
+    if (existingEntry.value < 0 || existingEntry.value >= static_cast<int>(parser.productions.size())) {
+        return false;
+    }
+
+    const Production& currentProd = parser.productions[newProdIndex];
+    const Production& existingProd = parser.productions[existingEntry.value];
+
+    if (currentProd.precedence > 0 && existingProd.precedence > 0) {
+        if (currentProd.precedence > existingProd.precedence) {
+            existingEntry = { ActionType::REDUCE, newProdIndex };
+            resolvedCount++;
+            return true;
+        }
+        if (currentProd.precedence < existingProd.precedence) {
+            resolvedCount++;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool LRGenerator::resolveShiftReduceConflict(int stateId, const StateTransition& transition, int reduceIndex, ActionEntry& existingEntry, int& resolvedCount) const
+{
+    if (reduceIndex < 0 || reduceIndex >= static_cast<int>(parser.productions.size())) {
+        return false;
+    }
+
+    const Production& reduceProd = parser.productions[reduceIndex];
+    const Symbol& lookAhead = transition.symbol;
+
+    auto symbolIt = parser.symbol_table.find(lookAhead.name);
+    if (reduceProd.precedence > 0 && symbolIt != parser.symbol_table.end() && symbolIt->second.precedence > 0) {
+
+        const Symbol& conflictSymbol = symbolIt->second;
+
+        if (reduceProd.precedence > conflictSymbol.precedence) {
+            resolvedCount++;
+            return true; // 保留规约
+        }
+
+        if (reduceProd.precedence < conflictSymbol.precedence) {
+            existingEntry = { ActionType::SHIFT, transition.to_state };
+            resolvedCount++;
+            return true;
+        }
+
+        switch (conflictSymbol.assoc) {
+        case Associativity::LEFT:
+            resolvedCount++;
+            return true; // 左结合，选择规约
+        case Associativity::RIGHT:
+            existingEntry = { ActionType::SHIFT, transition.to_state };
+            resolvedCount++;
+            return true;
+        case Associativity::NONASSOC:
+            existingEntry = { ActionType::ERROR, 0 };
+            resolvedCount++;
+            std::cout << "无结合性操作符 (报错): 状态 " << stateId
+                      << ", 符号 " << lookAhead.name << std::endl;
+            return true;
+        default:
+            break;
+        }
+    }
+
+    return false;
+}
+
+void LRGenerator::applyReduceAction(int stateId, const LRItem& item, int& conflictCount, int& resolvedCount)
+{
+    if (item.prod.left.name == "S'" && item.lookahead.name == "$") {
+        action_table[stateId][item.lookahead] = { ActionType::ACCEPT, 0 };
+        return;
+    }
+
+    const int prodIndex = productionIndexOf(item);
+    if (prodIndex < 0) {
+        std::cout << "  警告: 无法确定产生式索引: " << item.prod.left.name << " -> ";
+        if (item.prod.right.empty()) {
+            std::cout << "ε";
+        } else {
+            for (const Symbol& sym : item.prod.right) {
+                std::cout << sym.name << ' ';
+            }
+        }
+        std::cout << std::endl;
+        return;
+    }
+
+    auto& actions = action_table[stateId];
+    auto it = actions.find(item.lookahead);
+    if (it == actions.end()) {
+        actions[item.lookahead] = { ActionType::REDUCE, prodIndex };
+        return;
+    }
+
+    ActionEntry& existingEntry = it->second;
+    if (existingEntry.type != ActionType::REDUCE) {
+        return;
+    }
+
+    conflictCount++;
+
+    if (resolveReduceReduceConflict(prodIndex, existingEntry, resolvedCount)) {
+        return;
+    }
+
+    std::cout << "规约/规约冲突: 状态 " << stateId
+              << ", 符号 " << item.lookahead.name
+              << ", 产生式 " << prodIndex << " 和产生式 " << existingEntry.value << std::endl;
+
+    if (prodIndex < existingEntry.value) {
+        existingEntry = { ActionType::REDUCE, prodIndex };
+    }
+}
+
+void LRGenerator::applyShiftAction(int stateId, const StateTransition& transition, int& conflictCount, int& resolvedCount)
+{
+    auto& actions = action_table[stateId];
+    auto it = actions.find(transition.symbol);
+    if (it == actions.end()) {
+        actions[transition.symbol] = { ActionType::SHIFT, transition.to_state };
+        return;
+    }
+
+    ActionEntry& existingEntry = it->second;
+    if (existingEntry.type != ActionType::REDUCE) {
+        return;
+    }
+
+    conflictCount++;
+
+    if (resolveShiftReduceConflict(stateId, transition, existingEntry.value, existingEntry, resolvedCount)) {
+        return;
+    }
+
+    std::cout << "移入/规约冲突: 状态 " << stateId
+              << ", 符号 " << transition.symbol.name
+              << ", 移入到状态 " << transition.to_state
+              << " 或规约产生式 " << existingEntry.value << std::endl;
+
+    actions[transition.symbol] = { ActionType::SHIFT, transition.to_state };
+}
+
+void LRGenerator::reportConflictStats(int shiftReduceConflicts, int resolvedSR, int reduceReduceConflicts, int resolvedRR) const
+{
     std::cout << "\n==== 冲突统计 ====" << std::endl;
-    std::cout << "移入/规约冲突: " << shift_reduce_conflicts << " 个，已解决: " << resolved_sr_conflicts << " 个" << std::endl;
-    std::cout << "规约/规约冲突: " << reduce_reduce_conflicts << " 个，已解决: " << resolved_rr_conflicts << " 个" << std::endl;
+    std::cout << "移入/规约冲突: " << shiftReduceConflicts << " 个，已解决: " << resolvedSR << " 个" << std::endl;
+    std::cout << "规约/规约冲突: " << reduceReduceConflicts << " 个，已解决: " << resolvedRR << " 个" << std::endl;
     std::cout << "==================" << std::endl;
 
-    if (shift_reduce_conflicts == resolved_sr_conflicts && reduce_reduce_conflicts == resolved_rr_conflicts) {
-        if (shift_reduce_conflicts > 0 || reduce_reduce_conflicts > 0) {
+    if (shiftReduceConflicts == resolvedSR && reduceReduceConflicts == resolvedRR) {
+        if (shiftReduceConflicts > 0 || reduceReduceConflicts > 0) {
             std::cout << "所有冲突已通过优先级和结合性规则解决！" << std::endl;
         }
     }
@@ -322,60 +371,46 @@ void LRGenerator::buildActionGotoTable()
 ItemSet LRGenerator::computeClosure(const ItemSet& itemSet)
 {
     ItemSet result = itemSet;
-    bool changed = true;
-    int addedItems = 0;
+    size_t index = 0;
 
-    while (changed) {
-        changed = false;
-        std::vector<LRItem> items = result.items;
+    while (index < result.items.size()) {
+        const LRItem& item = result.items[index++];
 
-        for (const LRItem& item : items) {
-            // 如果点号后面有非终结符 B
-            if (item.dot_position < item.prod.right.size() && item.prod.right[item.dot_position].type == ElementType::NON_TERMINAL) {
+        if (item.dot_position >= item.prod.right.size()) {
+            continue;
+        }
 
-                Symbol B = item.prod.right[item.dot_position];
+        const Symbol& nextSymbol = item.prod.right[item.dot_position];
+        if (nextSymbol.type != ElementType::NON_TERMINAL) {
+            continue;
+        }
 
-                std::vector<Symbol> betaA;
-                // 构造 β a
-                for (int i = item.dot_position + 1; i < item.prod.right.size(); ++i) {
-                    betaA.push_back(item.prod.right[i]);
-                }
-                betaA.push_back(item.lookahead);
+        std::vector<Symbol> betaA;
+        betaA.reserve(item.prod.right.size() - item.dot_position);
+        betaA.insert(betaA.end(), item.prod.right.begin() + item.dot_position + 1, item.prod.right.end());
+        betaA.push_back(item.lookahead);
 
-                // 计算 FIRST(βa)
-                std::unordered_set<Symbol, SymbolHasher> firstSet = computeFirstOfSequence(betaA);
+        std::unordered_set<Symbol, SymbolHasher> firstSet = computeFirstOfSequence(betaA);
 
-                // 对于每个形如 B → γ 的产生式
-                int matchedProductions = 0;
-                for (const Production& p : parser.productions) {
-                    if (p.left.name == B.name) {
-                        matchedProductions++;
+        bool matchedProduction = false;
+        for (const Production& p : parser.productions) {
+            if (p.left.name != nextSymbol.name) {
+                continue;
+            }
 
-                        // 对每个 b ∈ FIRST(βa)
-                        for (const Symbol& b : firstSet) {
-                            LRItem newItem = { p, 0, b };
+            matchedProduction = true;
 
-                            // 检查新项是否已存在
-                            bool exists = false;
-                            for (const auto& existingItem : result.items) {
-                                if (existingItem == newItem) {
-                                    exists = true;
-                                    break;
-                                }
-                            }
+            for (const Symbol& lookahead : firstSet) {
+                LRItem newItem { p, 0, lookahead };
 
-                            if (!exists) {
-                                result.items.push_back(newItem);
-                                changed = true;
-                                addedItems++;
-                            }
-                        }
-                    }
-                }
-                if (matchedProductions == 0) {
-                    std::cout << "    警告: 没有找到非终结符 " << B.name << " 的产生式!" << std::endl;
+                if (std::find(result.items.begin(), result.items.end(), newItem) == result.items.end()) {
+                    result.items.push_back(newItem);
                 }
             }
+        }
+
+        if (!matchedProduction) {
+            std::cout << "    警告: 没有找到非终结符 " << nextSymbol.name << " 的产生式!" << std::endl;
         }
     }
     return result;
@@ -815,6 +850,9 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
 
 void LRGenerator::buildCanonicalCollection()
 {
+    transitions.clear();
+    canonical_collection.clear();
+
     // 首先添加增广文法的起始项
     addAugmentedProduction();
 

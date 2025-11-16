@@ -97,6 +97,15 @@ private:
     std::string generateParsingFunction() const;
     std::string generateReduceActions() const;
 
+    // 辅助函数：简化ACTION/GOTO构建逻辑
+    bool isReduceItem(const LRItem& item) const;
+    int productionIndexOf(const LRItem& item) const;
+    bool resolveReduceReduceConflict(int newProdIndex, ActionEntry& existingEntry, int& resolvedCount) const;
+    bool resolveShiftReduceConflict(int stateId, const StateTransition& transition, int reduceIndex, ActionEntry& existingEntry, int& resolvedCount) const;
+    void applyReduceAction(int stateId, const LRItem& item, int& conflictCount, int& resolvedCount);
+    void applyShiftAction(int stateId, const StateTransition& transition, int& conflictCount, int& resolvedCount);
+    void reportConflictStats(int shiftReduceConflicts, int resolvedSR, int reduceReduceConflicts, int resolvedRR) const;
+
     // 解析后的文法
     YaccParser parser;
 
