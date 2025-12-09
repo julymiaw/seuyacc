@@ -555,6 +555,25 @@ bool YaccParser::parseProduction(std::string& buffer, size_t& pos, const std::st
             break;
         }
 
+        // 检查是否为 %prec 指令
+        if (buffer[pos] == '%' && pos + 5 < buffer.size() && 
+            buffer.substr(pos, 5) == "%prec") {
+            pos += 5; // 跳过 %prec
+            skipWhitespaceAndComments(buffer, pos);
+            
+            // 读取优先级符号名
+            std::string prec_symbol;
+            while (pos < buffer.size() && (std::isalnum(buffer[pos]) || buffer[pos] == '_')) {
+                prec_symbol += buffer[pos++];
+            }
+            
+            // 在符号表中查找该符号的优先级
+            if (!prec_symbol.empty() && symbol_table.find(prec_symbol) != symbol_table.end()) {
+                prod.precedence = symbol_table[prec_symbol].precedence;
+            }
+            continue;
+        }
+
         // 检查是否为符号
         if (buffer[pos] != '{') {
             // 解析符号
@@ -668,7 +687,8 @@ bool YaccParser::parseSymbol(std::string& buffer, size_t& pos, Symbol& symbol)
         return true;
     }
 
-    std::cerr << "错误: 无效的符号" << std::endl;
+    // 如果都不匹配，输出更详细的错误信息
+    std::cerr << "错误: 无效的符号，位置: " << pos << ", 字符: '" << buffer[pos] << "'" << std::endl;
     return false;
 }
 

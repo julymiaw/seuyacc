@@ -1,6 +1,7 @@
 # Xmake cache
 .xmake/
 build/
+build_yacc_test/
 
 # MacOS Cache
 .DS_Store
