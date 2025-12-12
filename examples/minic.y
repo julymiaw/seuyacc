@@ -512,7 +512,7 @@ static void generate_return_statement(ASTNode* node, FILE* out, bool* has_return
     } else {
         fprintf(out, "    li a0, 0\n");
     }
-    fprintf(out, "    j .exit\n");
+    fprintf(out, "    ret\n");
 }
 
 static void generate_if_statement(ASTNode* node, FILE* out, bool* has_return) {
@@ -627,82 +627,115 @@ static void emit_data_section(FILE* out) {
 /* 生成代码段 */
 static void emit_text_section(ASTNode* root, FILE* out) {
     fprintf(out, ".text\n");
-    fprintf(out, ".globl main\n");
-    fprintf(out, "main:\n");
     
-    bool has_return = false;
-    bool found_main = false;
-    
-    /* 遍历声明列表，找到 main 函数(或第一个函数) */
+    /* 遍历所有函数声明，生成每个函数的代码 */
     if (root->child && root->child->type == AST_DECL_LIST) {
         ASTNode* decl = root->child->child;
-        ASTNode* first_func = NULL;
+        ASTNode* main_func = NULL;
         
-        while (decl) {
-            if (decl->type == AST_FUN_DECL) {
-                /* 函数声明：type_spec -> IDENT -> params -> compound_stmt */
-                ASTNode* type_node = decl->child;
+        /* 第一遍：找到 main 函数 */
+        ASTNode* temp = decl;
+        while (temp) {
+            if (temp->type == AST_FUN_DECL) {
+                ASTNode* type_node = temp->child;
                 ASTNode* ident_node = type_node ? type_node->sibling : NULL;
-                
-                /* 记录第一个函数 */
-                if (!first_func) {
-                    first_func = decl;
-                }
-                
                 if (ident_node && ident_node->type == AST_IDENT && 
                     ident_node->value && strcmp(ident_node->value, "main") == 0) {
-                    /* 找到 main 函数 */
-                    found_main = true;
-                    ASTNode* params = ident_node->sibling;
-                    ASTNode* compound = params ? params->sibling : NULL;
+                    main_func = temp;
+                    break;
+                }
+            }
+            temp = temp->sibling;
+        }
+        
+        /* 第二遍：生成所有函数的代码 */
+        while (decl) {
+            if (decl->type == AST_FUN_DECL) {
+                ASTNode* type_node = decl->child;
+                ASTNode* ident_node = type_node ? type_node->sibling : NULL;
+                ASTNode* params = ident_node ? ident_node->sibling : NULL;
+                ASTNode* compound = params ? params->sibling : NULL;
+                
+                /* 跳过函数声明（没有函数体） */
+                if (!compound || compound->type != AST_COMPOUND_STMT) {
+                    decl = decl->sibling;
+                    continue;
+                }
+                
+                /* 函数标签 */
+                if (ident_node && ident_node->value) {
+                    /* main 函数需要 .globl 声明 */
+                    if (strcmp(ident_node->value, "main") == 0) {
+                        fprintf(out, ".globl main\n");
+                    }
+                    fprintf(out, "%s:\n", ident_node->value);
                     
-                    if (compound && compound->type == AST_COMPOUND_STMT) {
-                        /* compound_stmt 包含 local_decls 和 stmt_list */
-                        ASTNode* child = compound->child;
-                        while (child) {
-                            if (child->type == AST_LOCAL_DECLS) {
-                                /* 局部声明已经在 collect_symbols 中处理 */
-                            } else if (child->type == AST_STMT_LIST) {
-                                generate_statement_list(child, out, &has_return);
+                    /* 保存函数参数到内存 */
+                    if (params) {
+                        ASTNode* param_node = NULL;
+                        int param_index = 0;
+                        
+                        /* params 可能是 AST_PARAM_LIST 或 AST_PARAMS(void) */
+                        if (params->type == AST_PARAM_LIST) {
+                            /* 直接是参数列表 */
+                            param_node = params->child;
+                        } else if (params->type == AST_PARAMS && 
+                                   params->value && strcmp(params->value, "void") != 0) {
+                            /* 可能包含参数列表 */
+                            param_node = params->child;
+                        }
+                        
+                        /* 遍历参数并保存 */
+                        while (param_node && param_index < 8) {
+                            if (param_node->type == AST_PARAM) {
+                                /* 找到参数的 IDENT */
+                                ASTNode* param_child = param_node->child;
+                                while (param_child) {
+                                    if (param_child->type == AST_IDENT && param_child->value) {
+                                        const char* label = ensure_symbol(param_child->value);
+                                        fprintf(out, "    la t6, %s\n", label);
+                                        fprintf(out, "    sw a%d, 0(t6)\n", param_index);
+                                        param_index++;
+                                        break;
+                                    }
+                                    param_child = param_child->sibling;
+                                }
                             }
-                            child = child->sibling;
+                            param_node = param_node->sibling;
                         }
                     }
-                    break;
+                    
+                    /* 生成函数体 */
+                    bool has_return = false;
+                    ASTNode* child = compound->child;
+                    while (child) {
+                        if (child->type == AST_STMT_LIST) {
+                            generate_statement_list(child, out, &has_return);
+                        }
+                        child = child->sibling;
+                    }
+                    
+                    /* 如果是 main 函数且没有 return，添加默认退出 */
+                    if (strcmp(ident_node->value, "main") == 0) {
+                        if (!has_return) {
+                            fprintf(out, "    li a0, 0\n");
+                        }
+                        fprintf(out, ".exit:\n");
+                        fprintf(out, "    li a7, 93\n");
+                        fprintf(out, "    ecall\n");
+                    } else {
+                        /* 其他函数如果没有 return，添加默认 return */
+                        if (!has_return) {
+                            fprintf(out, "    li a0, 0\n");
+                            fprintf(out, "    ret\n");
+                        }
+                    }
+                    fprintf(out, "\n");
                 }
             }
             decl = decl->sibling;
         }
-        
-        /* 如果没有找到 main 函数,使用第一个函数 */
-        if (!found_main && first_func) {
-            ASTNode* type_node = first_func->child;
-            ASTNode* ident_node = type_node ? type_node->sibling : NULL;
-            ASTNode* params = ident_node ? ident_node->sibling : NULL;
-            ASTNode* compound = params ? params->sibling : NULL;
-            
-            if (compound && compound->type == AST_COMPOUND_STMT) {
-                ASTNode* child = compound->child;
-                while (child) {
-                    if (child->type == AST_LOCAL_DECLS) {
-                        /* 局部声明已经在 collect_symbols 中处理 */
-                    } else if (child->type == AST_STMT_LIST) {
-                        generate_statement_list(child, out, &has_return);
-                    }
-                    child = child->sibling;
-                }
-            }
-        }
     }
-    
-    /* 如果没有显式 return，添加默认退出 */
-    if (!has_return) {
-        fprintf(out, "    li a0, 0\n");
-    }
-    
-    fprintf(out, ".exit:\n");
-    fprintf(out, "    li a7, 93\n");
-    fprintf(out, "    ecall\n");
 }
 
 /* 生成汇编代码 */
