@@ -9,11 +9,17 @@ mkdir -p "$build_dir"
 cp "$root_dir/examples/minic.y" "$build_dir/"
 cp "$root_dir/examples/minic.l" "$build_dir/"
 
+echo "Running lex..."
+"$root_dir/seulex" "$build_dir/minic.l"
+cp "$root_dir/lex.yy.c" "$build_dir/minic_lex.yy.c"
+rm -rf "$root_dir/lex.yy.c"
+
+# flex -o"$build_dir/minic_lex.yy.c" "$build_dir/minic.l"
+
 echo "Running seuyacc..."
 "$root_dir/seuyacc" --definitions "$build_dir/minic.y"
 
-echo "Running lex..."
-lex -o "$build_dir/minic_lex.yy.c" "$build_dir/minic.l"
+bison "$build_dir/minic.y"
 
 echo "Compiling parser..."
 parser_c="$build_dir/minic.tab.c"
@@ -28,6 +34,7 @@ test_files=(
   "no_param.c"
   "interrupt.c"
   "array_access.c"
+  "led_control.c"
 )
 
 echo ""

@@ -9,6 +9,11 @@ build_yacc_test/
 .vscode
 
 *.exe
+*.zip
+
+# Generated executables
+seulex
+seuyacc
 
 examples/*.md
 examples/*.puml

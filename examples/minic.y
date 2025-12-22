@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-/* AST 节点类型枚举 */
+/* ============ AST ============ */
 typedef enum {
     AST_PROGRAM,
     AST_DECL_LIST,
@@ -37,56 +37,48 @@ typedef enum {
     AST_ARG_LIST
 } NodeType;
 
-/* AST 节点结构 */
 typedef struct ASTNode {
     NodeType type;
     char* value;
-    char* op;  /* 用于存储运算符 */
+    char* op;
     struct ASTNode* child;
     struct ASTNode* sibling;
 } ASTNode;
 
-/* 全局变量 */
 ASTNode* ast_root = NULL;
 int node_count = 0;
 
-/* 符号表结构 */
+/* ============ Symbol Table ============ */
+typedef enum { SCOPE_GLOBAL, SCOPE_LOCAL, SCOPE_PARAM } Scope;
+
 typedef struct Symbol {
     char* name;
-    char* label;
-    int array_size;  /* 0 表示普通变量，>0 表示数组 */
+    char* label;          /* only for global */
+    Scope scope;
+    char* func;           /* function name for local/param */
+    int offset;           /* relative to s0, negative */
+    int array_size;       /* for real arrays; 0 means scalar or pointer */
+    bool is_param_array;  /* param array treated as pointer */
     struct Symbol* next;
 } Symbol;
 
-typedef struct StringLiteralEntry {
-    char* value;
-    char* label;
-    struct StringLiteralEntry* next;
-} StringLiteralEntry;
+static Symbol* global_head = NULL;
+static Symbol* global_tail = NULL;
 
-static Symbol* symbol_head = NULL;
-static Symbol* symbol_tail = NULL;
-static StringLiteralEntry* string_head = NULL;
-static StringLiteralEntry* string_tail = NULL;
-static int string_literal_counter = 0;
-static const char* temp_registers[8] = {"t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0"};
+static Symbol* local_head = NULL; /* includes params + locals for current function */
+static Symbol* local_tail = NULL;
+
+/* temp regs */
+static const char* temp_registers[8] = {"t0","t1","t2","t3","t4","t5","t6","a0"};
 static int temp_reg_top = 0;
+
 static int label_counter = 0;
+static const char* current_ret_label = NULL;
 
-/* 函数声明 */
-ASTNode* create_node(NodeType type, char* value);
-void add_child(ASTNode* parent, ASTNode* child);
-void free_ast(ASTNode* node);
-void generate_assembly(ASTNode* root);
-const char* node_type_str(NodeType type);
-
-/* 创建新节点 */
-ASTNode* create_node(NodeType type, char* value) {
+/* ============ AST helpers ============ */
+static ASTNode* create_node(NodeType type, char* value) {
     ASTNode* node = (ASTNode*)malloc(sizeof(ASTNode));
-    if (!node) {
-        fprintf(stderr, "Error: 内存分配失败\n");
-        exit(1);
-    }
+    if (!node) { fprintf(stderr, "Error: malloc failed\n"); exit(1); }
     node->type = type;
     node->value = value ? strdup(value) : NULL;
     node->op = NULL;
@@ -96,448 +88,587 @@ ASTNode* create_node(NodeType type, char* value) {
     return node;
 }
 
-/* 添加子节点 */
-void add_child(ASTNode* parent, ASTNode* child) {
+static void add_child(ASTNode* parent, ASTNode* child) {
     if (!parent || !child) return;
-    
-    if (parent->child == NULL) {
-        parent->child = child;
-    } else {
-        ASTNode* sibling = parent->child;
-        while (sibling->sibling != NULL) {
-            sibling = sibling->sibling;
-        }
-        sibling->sibling = child;
+    if (!parent->child) parent->child = child;
+    else {
+        ASTNode* s = parent->child;
+        while (s->sibling) s = s->sibling;
+        s->sibling = child;
     }
 }
 
-/* 释放 AST */
-void free_ast(ASTNode* node) {
+static void free_ast(ASTNode* node) {
     if (!node) return;
-    if (node->child) free_ast(node->child);
-    if (node->sibling) free_ast(node->sibling);
+    free_ast(node->child);
+    free_ast(node->sibling);
     if (node->value) free(node->value);
     if (node->op) free(node->op);
     free(node);
 }
 
-/* 符号表管理 */
-static void free_symbol_table(void) {
-    Symbol* current = symbol_head;
-    while (current) {
-        Symbol* next = current->next;
-        free(current->name);
-        free(current->label);
-        free(current);
-        current = next;
+/* ============ Symbol helpers ============ */
+static void clear_locals(void) {
+    Symbol* s = local_head;
+    while (s) {
+        Symbol* n = s->next;
+        free(s->name);
+        if (s->func) free(s->func);
+        free(s);
+        s = n;
     }
-    symbol_head = NULL;
-    symbol_tail = NULL;
+    local_head = local_tail = NULL;
 }
 
-static Symbol* find_symbol(const char* name) {
-    Symbol* current = symbol_head;
-    while (current) {
-        if (strcmp(current->name, name) == 0) {
-            return current;
-        }
-        current = current->next;
+static void free_globals(void) {
+    Symbol* s = global_head;
+    while (s) {
+        Symbol* n = s->next;
+        free(s->name);
+        free(s->label);
+        free(s);
+        s = n;
     }
+    global_head = global_tail = NULL;
+}
+
+static Symbol* find_global(const char* name) {
+    for (Symbol* s = global_head; s; s = s->next)
+        if (strcmp(s->name, name) == 0) return s;
     return NULL;
 }
 
-static const char* ensure_symbol(const char* name) {
-    if (!name) return NULL;
-    Symbol* existing = find_symbol(name);
-    if (existing) {
-        return existing->label;
-    }
-    Symbol* symbol = (Symbol*)malloc(sizeof(Symbol));
-    if (!symbol) {
-        fprintf(stderr, "Error: 符号表内存分配失败\n");
-        exit(1);
-    }
-    symbol->name = strdup(name);
-    size_t label_len = strlen(name) + 5;
-    symbol->label = (char*)malloc(label_len);
-    if (!symbol->label) {
-        fprintf(stderr, "Error: 标签内存分配失败\n");
-        exit(1);
-    }
-    snprintf(symbol->label, label_len, "var_%s", name);
-    symbol->array_size = 0;
-    symbol->next = NULL;
-    if (!symbol_head) {
-        symbol_head = symbol;
-        symbol_tail = symbol;
-    } else {
-        symbol_tail->next = symbol;
-        symbol_tail = symbol;
-    }
-    return symbol->label;
+static Symbol* add_global(const char* name) {
+    Symbol* s = find_global(name);
+    if (s) return s;
+
+    s = (Symbol*)malloc(sizeof(Symbol));
+    if (!s) { fprintf(stderr, "Error: malloc failed\n"); exit(1); }
+
+    s->name = strdup(name);
+    s->label = (char*)malloc(strlen(name) + 5);
+    sprintf(s->label, "var_%s", name);
+    s->scope = SCOPE_GLOBAL;
+    s->func = NULL;
+    s->offset = 0;
+    s->array_size = 0;
+    s->is_param_array = false;
+    s->next = NULL;
+
+    if (!global_head) global_head = global_tail = s;
+    else global_tail = global_tail->next = s;
+    return s;
 }
 
-/* 收集符号 */
-static void collect_symbols(ASTNode* node) {
-    if (!node) return;
-    
-    /* 只收集变量声明和局部变量声明 */
-    if (node->type == AST_VAR_DECL || node->type == AST_LOCAL_DECL) {
-        /* 找到 IDENT 节点和可能的数组大小 */
-        ASTNode* child = node->child;
-        ASTNode* ident_node = NULL;
-        ASTNode* size_node = NULL;
-        
-        while (child) {
-            if (child->type == AST_IDENT) {
-                ident_node = child;
-            } else if (child->type == AST_INT_LITERAL && ident_node) {
-                size_node = child;
-            }
-            child = child->sibling;
-        }
-        
-        if (ident_node) {
-            ensure_symbol(ident_node->value);
-            /* 如果有数组大小,更新符号表 */
-            if (size_node && node->value && strcmp(node->value, "array") == 0) {
-                Symbol* sym = find_symbol(ident_node->value);
-                if (sym && size_node->value) {
-                    sym->array_size = atoi(size_node->value);
-                }
-            }
-        }
-    }
-    
-    /* 递归遍历 */
-    collect_symbols(node->child);
-    collect_symbols(node->sibling);
+static Symbol* find_local(const char* name) {
+    for (Symbol* s = local_head; s; s = s->next)
+        if (strcmp(s->name, name) == 0) return s;
+    return NULL;
 }
 
-/* 临时寄存器管理 */
+static Symbol* add_local(const char* func, const char* name, int offset,
+                         int array_size, Scope scope, bool is_param_array) {
+    Symbol* s = (Symbol*)malloc(sizeof(Symbol));
+    if (!s) { fprintf(stderr, "Error: malloc failed\n"); exit(1); }
+
+    s->name = strdup(name);
+    s->label = NULL;
+    s->scope = scope;
+    s->func = func ? strdup(func) : NULL;
+    s->offset = offset;
+    s->array_size = array_size;
+    s->is_param_array = is_param_array;
+    s->next = NULL;
+
+    if (!local_head) local_head = local_tail = s;
+    else local_tail = local_tail->next = s;
+    return s;
+}
+
+/* ============ temp regs ============ */
 static const char* acquire_temp_register(void) {
-    if (temp_reg_top >= 8) {
-        fprintf(stderr, "Error: 临时寄存器耗尽\n");
-        exit(1);
-    }
+    if (temp_reg_top >= 8) { fprintf(stderr, "Error: temp regs exhausted\n"); exit(1); }
     return temp_registers[temp_reg_top++];
 }
-
 static void release_temp_register(const char* reg) {
-    if (temp_reg_top > 0) {
-        temp_reg_top--;
-    }
+    (void)reg;
+    if (temp_reg_top > 0) temp_reg_top--;
 }
 
-/* 生成标签 */
+/* ============ labels ============ */
 static char* generate_label(const char* prefix) {
-    char* label = (char*)malloc(32);
-    snprintf(label, 32, "%s%d", prefix, label_counter++);
+    char* label = (char*)malloc(64);
+    snprintf(label, 64, "%s%d", prefix, label_counter++);
     return label;
 }
 
-/* 表达式代码生成 */
+/* ============ collect globals ============ */
+static void collect_globals(ASTNode* node) {
+    if (!node) return;
+
+    if (node->type == AST_VAR_DECL) {
+        ASTNode* id = NULL;
+        ASTNode* size = NULL;
+        for (ASTNode* c = node->child; c; c = c->sibling) {
+            if (c->type == AST_IDENT) id = c;
+            else if (c->type == AST_INT_LITERAL) size = c;
+        }
+        if (id && id->value) {
+            Symbol* g = add_global(id->value);
+            if (node->value && strcmp(node->value, "array") == 0 && size && size->value)
+                g->array_size = atoi(size->value);
+        }
+    }
+
+    collect_globals(node->child);
+    collect_globals(node->sibling);
+}
+
+/* ============ build params/locals on stack ============ */
+/* layout: offsets are negative relative to s0 */
+static int build_params(ASTNode* params, const char* func, int start_offset_bytes) {
+    int offset = start_offset_bytes; /* already allocated bytes */
+
+    if (!params) return offset;
+
+    ASTNode* first = NULL;
+    if (params->type == AST_PARAM_LIST) first = params->child;
+    else if (params->type == AST_PARAMS) {
+        if (params->value && strcmp(params->value, "void") == 0) return offset;
+        first = params->child;
+    }
+
+    for (ASTNode* p = first; p; p = p->sibling) {
+        if (p->type != AST_PARAM) continue;
+
+        ASTNode* id = NULL;
+        ASTNode* size = NULL;
+        for (ASTNode* c = p->child; c; c = c->sibling) {
+            if (c->type == AST_IDENT) id = c;
+            else if (c->type == AST_INT_LITERAL) size = c;
+        }
+        if (!id || !id->value) continue;
+
+        bool is_arr = (p->value && strcmp(p->value, "array") == 0);
+
+        /* param scalar => 4 bytes slot
+           param array => treat as pointer => 4 bytes slot */
+        offset += 4;
+        add_local(func, id->value, -offset, 0, SCOPE_PARAM, is_arr);
+        (void)size;
+    }
+
+    return offset;
+}
+
+static int build_locals(ASTNode* local_decls, const char* func, int start_offset_bytes) {
+    int offset = start_offset_bytes;
+
+    if (!local_decls || local_decls->type != AST_LOCAL_DECLS) return offset;
+
+    for (ASTNode* d = local_decls->child; d; d = d->sibling) {
+        if (d->type != AST_LOCAL_DECL) continue;
+
+        ASTNode* id = NULL;
+        ASTNode* size = NULL;
+        for (ASTNode* c = d->child; c; c = c->sibling) {
+            if (c->type == AST_IDENT) id = c;
+            else if (c->type == AST_INT_LITERAL) size = c;
+        }
+        if (!id || !id->value) continue;
+
+        int bytes = 4;
+        int arr = 0;
+        if (d->value && strcmp(d->value, "array") == 0 && size && size->value) {
+            arr = atoi(size->value);
+            bytes = arr * 4;
+        }
+
+        offset += bytes;
+        add_local(func, id->value, -offset, arr, SCOPE_LOCAL, false);
+    }
+
+    return offset;
+}
+
+static int align16(int x) { return (x + 15) & ~15; }
+
+/* prologue/epilogue (s0 as fp) */
+static void emit_prologue(FILE* out, int frame) {
+    /* reserve frame + save ra/s0 (8 bytes) */
+    fprintf(out, "    addi sp, sp, -%d\n", frame + 8);
+    fprintf(out, "    sw ra, %d(sp)\n", frame + 4);
+    fprintf(out, "    sw s0, %d(sp)\n", frame + 0);
+    fprintf(out, "    addi s0, sp, %d\n", frame + 8);
+}
+
+static void emit_epilogue(FILE* out, int frame) {
+    fprintf(out, "    lw s0, %d(sp)\n", frame + 0);
+    fprintf(out, "    lw ra, %d(sp)\n", frame + 4);
+    fprintf(out, "    addi sp, sp, %d\n", frame + 8);
+    fprintf(out, "    jalr x0, 0(ra)\n");
+}
+
+/* store incoming a0-a7 into param slots */
+static void spill_params(FILE* out) {
+    int idx = 0;
+    for (Symbol* s = local_head; s; s = s->next) {
+        if (s->scope != SCOPE_PARAM) continue;
+        if (idx >= 8) break;
+        fprintf(out, "    sw a%d, %d(s0)\n", idx, s->offset);
+        idx++;
+    }
+}
+
+/* ============ codegen expressions ============ */
 static const char* generate_expression(ASTNode* node, FILE* out);
 
 static const char* load_identifier(const char* name, FILE* out) {
-    const char* label = ensure_symbol(name);
     const char* reg = acquire_temp_register();
-    fprintf(out, "    la %s, %s\n", reg, label);
+
+    // 1) 先查局部（含形参）
+    Symbol* l = find_local(name);
+    if (l) {
+        // 1.1 局部“真数组”：栈上分配了一段空间，IDENT 应该给出首地址
+        if (l->array_size > 0 && !l->is_param_array) {
+            // reg = &local_array[0]
+            fprintf(out, "    addi %s, s0, %d\n", reg, l->offset);
+            return reg;
+        }
+
+        // 1.2 参数数组（指针）或普通局部变量：栈槽里存的是“值”
+        // 参数数组：值就是 base pointer；普通变量：值就是 int
+        fprintf(out, "    lw %s, %d(s0)\n", reg, l->offset);
+        return reg;
+    }
+
+    // 2) 再查全局
+    Symbol* g = find_global(name);
+    if (!g) g = add_global(name); // 容错
+
+    // 2.1 全局数组：IDENT 给出地址
+    if (g->array_size > 0) {
+        fprintf(out, "    auipc %s, %%pcrel_hi(%s)\n", reg, g->label);
+        fprintf(out, "    addi  %s, %s, %%pcrel_lo(%s)\n", reg, reg, g->label);
+        return reg;
+    }
+
+    // 2.2 普通全局变量：先取地址再解引用
+    fprintf(out, "    auipc %s, %%pcrel_hi(%s)\n", reg, g->label);
+    fprintf(out, "    addi  %s, %s, %%pcrel_lo(%s)\n", reg, reg, g->label);
     fprintf(out, "    lw %s, 0(%s)\n", reg, reg);
     return reg;
 }
 
-static const char* load_integer_literal(const char* literal, FILE* out) {
+
+// static const char* load_identifier(const char* name, FILE* out) {
+//     const char* reg = acquire_temp_register();
+//     Symbol* l = find_local(name);
+//     if (l) {
+//         fprintf(out, "    lw %s, %d(s0)\n", reg, l->offset);
+//         return reg;
+//     }
+//     Symbol* g = find_global(name);
+//     if (!g) g = add_global(name); /* tolerate */
+//     fprintf(out, "    auipc %s, %%pcrel_hi(%s)\n", reg, g->label);
+//     fprintf(out, "    addi  %s, %s, %%pcrel_lo(%s)\n", reg, reg, g->label);
+//     fprintf(out, "    lw %s, 0(%s)\n", reg, reg);
+//     return reg;
+// }
+
+static long parse_imm32(const char* lit) {
+    char* end = NULL;
+    long v = strtol(lit, &end, 10);   // 你的 lit 基本是十进制字符串
+    return v;
+}
+
+static int fits_i12(long v) {
+    return (v >= -2048 && v <= 2047);
+}
+
+static const char* load_integer_literal(const char* lit, FILE* out) {
     const char* reg = acquire_temp_register();
-    fprintf(out, "    li %s, %s\n", reg, literal);
+    long v = parse_imm32(lit);
+
+    if (fits_i12(v)) {
+        // 1条指令：addi
+        fprintf(out, "    addi %s, x0, %ld\n", reg, v);
+    } else {
+        // 2条指令：lui + addi（带 0x800 修正）
+        long hi = (v + 0x800) >> 12;
+        long lo = v - (hi << 12);   // 保证落在 [-2048, 2047]
+
+        fprintf(out, "    lui  %s, %ld\n", reg, hi);
+        fprintf(out, "    addi %s, %s, %ld\n", reg, reg, lo);
+    }
+
     return reg;
+}
+
+static void emit_array_base(ASTNode* array_id, FILE* out, const char* base_reg) {
+    /* local array: base = s0 + offset
+       param array(pointer): load pointer from slot into base_reg
+       global: la base_reg, label */
+    Symbol* l = find_local(array_id->value);
+    if (l) {
+        if (l->scope == SCOPE_PARAM && l->is_param_array) {
+            fprintf(out, "    lw %s, %d(s0)\n", base_reg, l->offset);
+        } else {
+            fprintf(out, "    addi %s, s0, %d\n", base_reg, l->offset);
+        }
+        return;
+    }
+    Symbol* g = find_global(array_id->value);
+    if (!g) g = add_global(array_id->value);
+    fprintf(out, "    auipc %s, %%pcrel_hi(%s)\n", base_reg, g->label);
+    fprintf(out, "    addi  %s, %s, %%pcrel_lo(%s)\n", base_reg, base_reg, g->label);
 }
 
 static const char* generate_binary_expr(ASTNode* node, FILE* out) {
     if (!node->child || !node->child->sibling) return NULL;
-    
-    const char* left_reg = generate_expression(node->child, out);
-    const char* right_reg = generate_expression(node->child->sibling, out);
-    const char* result_reg = acquire_temp_register();
-    
-    const char* op = node->op;
-    if (strcmp(op, "+") == 0) {
-        fprintf(out, "    add %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "-") == 0) {
-        fprintf(out, "    sub %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "*") == 0) {
-        fprintf(out, "    mul %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "/") == 0) {
-        fprintf(out, "    div %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "%") == 0) {
-        fprintf(out, "    rem %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "&") == 0) {
-        fprintf(out, "    and %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "|") == 0) {
-        fprintf(out, "    or %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "^") == 0) {
-        fprintf(out, "    xor %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "<<") == 0) {
-        fprintf(out, "    sll %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, ">>") == 0) {
-        fprintf(out, "    sra %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, "<") == 0) {
-        fprintf(out, "    slt %s, %s, %s\n", result_reg, left_reg, right_reg);
-    } else if (strcmp(op, ">") == 0) {
-        fprintf(out, "    slt %s, %s, %s\n", result_reg, right_reg, left_reg);
-    } else if (strcmp(op, "==") == 0) {
-        fprintf(out, "    sub %s, %s, %s\n", result_reg, left_reg, right_reg);
-        fprintf(out, "    seqz %s, %s\n", result_reg, result_reg);
+
+    const char* left = generate_expression(node->child, out);
+    const char* right = generate_expression(node->child->sibling, out);
+    const char* res = acquire_temp_register();
+
+    const char* op = node->op ? node->op : "";
+
+    if (strcmp(op, "+") == 0) fprintf(out, "    add %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "-") == 0) fprintf(out, "    sub %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "*") == 0) fprintf(out, "    mul %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "/") == 0) fprintf(out, "    div %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "%") == 0) fprintf(out, "    rem %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "&") == 0) fprintf(out, "    and %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "|") == 0) fprintf(out, "    or  %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "^") == 0) fprintf(out, "    xor %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "<<") == 0) fprintf(out, "    sll %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, ">>") == 0) fprintf(out, "    sra %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, "<") == 0) fprintf(out, "    slt %s, %s, %s\n", res, left, right);
+    else if (strcmp(op, ">") == 0) fprintf(out, "    slt %s, %s, %s\n", res, right, left);
+    else if (strcmp(op, "==") == 0) {
+        fprintf(out, "    sub %s, %s, %s\n", res, left, right);
+        fprintf(out, "    sltiu %s, %s, 1\n", res, res);
     } else if (strcmp(op, "!=") == 0) {
-        fprintf(out, "    sub %s, %s, %s\n", result_reg, left_reg, right_reg);
-        fprintf(out, "    snez %s, %s\n", result_reg, result_reg);
+        fprintf(out, "    sub  %s, %s, %s\n", res, left, right);
+        fprintf(out, "    sltu %s, x0, %s\n", res, res);
     } else if (strcmp(op, "<=") == 0) {
-        fprintf(out, "    slt %s, %s, %s\n", result_reg, right_reg, left_reg);
-        fprintf(out, "    xori %s, %s, 1\n", result_reg, result_reg);
+        fprintf(out, "    slt %s, %s, %s\n", res, right, left);
+        fprintf(out, "    xori %s, %s, 1\n", res, res);
     } else if (strcmp(op, ">=") == 0) {
-        fprintf(out, "    slt %s, %s, %s\n", result_reg, left_reg, right_reg);
-        fprintf(out, "    xori %s, %s, 1\n", result_reg, result_reg);
+        fprintf(out, "    slt %s, %s, %s\n", res, left, right);
+        fprintf(out, "    xori %s, %s, 1\n", res, res);
     } else if (strcmp(op, "&&") == 0) {
-        fprintf(out, "    snez %s, %s\n", left_reg, left_reg);
-        fprintf(out, "    snez %s, %s\n", right_reg, right_reg);
-        fprintf(out, "    and %s, %s, %s\n", result_reg, left_reg, right_reg);
+        fprintf(out, "    sltu %s, x0, %s\n", left, left);
+        fprintf(out, "    sltu %s, x0, %s\n", right, right);
+        fprintf(out, "    and  %s, %s, %s\n", res, left, right);
     } else if (strcmp(op, "||") == 0) {
-        fprintf(out, "    or %s, %s, %s\n", result_reg, left_reg, right_reg);
-        fprintf(out, "    snez %s, %s\n", result_reg, result_reg);
+        fprintf(out, "    or   %s, %s, %s\n", res, left, right);
+        fprintf(out, "    sltu %s, x0, %s\n", res, res);
     }
-    
-    release_temp_register(right_reg);
-    release_temp_register(left_reg);
-    
-    return result_reg;
+
+    release_temp_register(right);
+    release_temp_register(left);
+    return res;
 }
 
 static const char* generate_unary_expr(ASTNode* node, FILE* out) {
     if (!node->child) return NULL;
-    
-    const char* op = node->op;
-    
-    /* 特殊处理内存解引用 */
+    const char* op = node->op ? node->op : "";
+
+    /* memory deref: $addr */
     if (strcmp(op, "$") == 0) {
-        /* 内存解引用: $addr -> 读取地址处的值 */
-        const char* addr_reg = generate_expression(node->child, out);
-        if (!addr_reg) return NULL;
-        
-        const char* result_reg = acquire_temp_register();
-        fprintf(out, "    lw %s, 0(%s)\n", result_reg, addr_reg);
-        release_temp_register(addr_reg);
-        return result_reg;
+        const char* addr = generate_expression(node->child, out);
+        const char* res = acquire_temp_register();
+        fprintf(out, "    lw %s, 0(%s)\n", res, addr);
+        release_temp_register(addr);
+        return res;
     }
-    
-    const char* operand_reg = generate_expression(node->child, out);
-    const char* result_reg = acquire_temp_register();
-    
-    if (strcmp(op, "-") == 0) {
-        fprintf(out, "    neg %s, %s\n", result_reg, operand_reg);
-    } else if (strcmp(op, "!") == 0) {
-        fprintf(out, "    seqz %s, %s\n", result_reg, operand_reg);
-    } else if (strcmp(op, "~") == 0) {
-        fprintf(out, "    not %s, %s\n", result_reg, operand_reg);
-    } else if (strcmp(op, "+") == 0) {
-        fprintf(out, "    mv %s, %s\n", result_reg, operand_reg);
-    }
-    
-    release_temp_register(operand_reg);
-    return result_reg;
+
+    const char* x = generate_expression(node->child, out);
+    const char* res = acquire_temp_register();
+
+    if (strcmp(op, "-") == 0) fprintf(out, "    sub %s, x0, %s\n", res, x);
+    else if (strcmp(op, "!") == 0) fprintf(out, "    sltiu %s, %s, 1\n", res, x);
+    else if (strcmp(op, "~") == 0) fprintf(out, "    xori %s, %s, -1\n", res, x);
+    else if (strcmp(op, "+") == 0) fprintf(out, "    addi  %s, %s, 0\n", res, x);
+
+    release_temp_register(x);
+    return res;
 }
 
 static const char* generate_expression(ASTNode* node, FILE* out) {
     if (!node) return NULL;
-    
+
     switch (node->type) {
         case AST_IDENT:
             return load_identifier(node->value, out);
+
         case AST_INT_LITERAL:
             return load_integer_literal(node->value, out);
+
         case AST_BINARY_EXPR:
             return generate_binary_expr(node, out);
+
         case AST_UNARY_EXPR:
             return generate_unary_expr(node, out);
+
         case AST_ARRAY_ACCESS: {
-            /* 数组访问: a[index] */
             if (!node->child || !node->child->sibling) return NULL;
-            
             ASTNode* array_id = node->child;
-            ASTNode* index_expr = node->child->sibling;
-            
-            /* 计算索引 */
-            const char* index_reg = generate_expression(index_expr, out);
-            if (!index_reg) return NULL;
-            
-            /* 获取数组基地址 */
-            const char* label = ensure_symbol(array_id->value);
-            const char* base_reg = acquire_temp_register();
-            fprintf(out, "    la %s, %s\n", base_reg, label);
-            
-            /* 计算偏移量 (index * 4) */
-            const char* offset_reg = acquire_temp_register();
-            fprintf(out, "    slli %s, %s, 2\n", offset_reg, index_reg);
-            
-            /* 计算实际地址 */
-            const char* addr_reg = acquire_temp_register();
-            fprintf(out, "    add %s, %s, %s\n", addr_reg, base_reg, offset_reg);
-            
-            /* 从内存加载值 */
-            const char* result_reg = acquire_temp_register();
-            fprintf(out, "    lw %s, 0(%s)\n", result_reg, addr_reg);
-            
-            release_temp_register(addr_reg);
-            release_temp_register(offset_reg);
-            release_temp_register(base_reg);
-            release_temp_register(index_reg);
-            
-            return result_reg;
+            ASTNode* index = node->child->sibling;
+
+            const char* idx = generate_expression(index, out);
+            const char* base = acquire_temp_register();
+            emit_array_base(array_id, out, base);
+
+            const char* off = acquire_temp_register();
+            fprintf(out, "    slli %s, %s, 2\n", off, idx);
+
+            const char* addr = acquire_temp_register();
+            fprintf(out, "    add %s, %s, %s\n", addr, base, off);
+
+            const char* res = acquire_temp_register();
+            fprintf(out, "    lw %s, 0(%s)\n", res, addr);
+
+            release_temp_register(addr);
+            release_temp_register(off);
+            release_temp_register(base);
+            release_temp_register(idx);
+            return res;
         }
+
         case AST_ASSIGN_EXPR: {
             if (!node->child || !node->child->sibling) return NULL;
-            
-            /* 生成右侧表达式的值 */
-            const char* value_reg = generate_expression(node->child->sibling, out);
-            if (!value_reg) return NULL;
-            
-            /* 检查是否是内存赋值 ($addr = value) */
+
+            const char* v = generate_expression(node->child->sibling, out);
+            if (!v) return NULL;
+
+            /* memory assign: $addr = v */
             if (node->value && strcmp(node->value, "memory") == 0) {
-                /* 内存赋值: $addr = value */
-                const char* addr_reg = generate_expression(node->child, out);
-                if (!addr_reg) return NULL;
-                
-                fprintf(out, "    sw %s, 0(%s)\n", value_reg, addr_reg);
-                release_temp_register(addr_reg);
-                return value_reg;
+                const char* addr = generate_expression(node->child, out);
+                fprintf(out, "    sw %s, 0(%s)\n", v, addr);
+                release_temp_register(addr);
+                return v;
             }
-            
-            /* 获取左侧标识符或数组访问 */
+
+            /* lhs */
             if (node->child->type == AST_IDENT) {
-                /* 简单变量赋值 */
-                const char* label = ensure_symbol(node->child->value);
-                fprintf(out, "    la t6, %s\n", label);
-                fprintf(out, "    sw %s, 0(t6)\n", value_reg);
-            } else if (node->child->type == AST_ARRAY_ACCESS) {
-                /* 数组元素赋值: a[index] = value */
-                ASTNode* array_access = node->child;
-                if (!array_access->child || !array_access->child->sibling) return NULL;
-                
-                ASTNode* array_id = array_access->child;
-                ASTNode* index_expr = array_access->child->sibling;
-                
-                /* 计算索引 */
-                const char* index_reg = generate_expression(index_expr, out);
-                if (!index_reg) return NULL;
-                
-                /* 获取数组基地址 */
-                const char* label = ensure_symbol(array_id->value);
-                const char* base_reg = acquire_temp_register();
-                fprintf(out, "    la %s, %s\n", base_reg, label);
-                
-                /* 计算偏移量 (index * 4) */
-                const char* offset_reg = acquire_temp_register();
-                fprintf(out, "    slli %s, %s, 2\n", offset_reg, index_reg);
-                
-                /* 计算实际地址 */
-                const char* addr_reg = acquire_temp_register();
-                fprintf(out, "    add %s, %s, %s\n", addr_reg, base_reg, offset_reg);
-                
-                /* 存储值到内存 */
-                fprintf(out, "    sw %s, 0(%s)\n", value_reg, addr_reg);
-                
-                release_temp_register(addr_reg);
-                release_temp_register(offset_reg);
-                release_temp_register(base_reg);
-                release_temp_register(index_reg);
+                const char* name = node->child->value;
+                Symbol* l = find_local(name);
+                if (l) {
+                    fprintf(out, "    sw %s, %d(s0)\n", v, l->offset);
+                } else {
+                    Symbol* g = find_global(name);
+                    if (!g) g = add_global(name);
+                    fprintf(out, "    auipc t6, %%pcrel_hi(%s)\n", g->label);
+                    fprintf(out, "    addi  t6, t6, %%pcrel_lo(%s)\n", g->label);
+                    fprintf(out, "    sw %s, 0(t6)\n", v);
+                }
+                return v;
             }
-            return value_reg;
+
+            if (node->child->type == AST_ARRAY_ACCESS) {
+                ASTNode* aa = node->child;
+                if (!aa->child || !aa->child->sibling) return NULL;
+
+                ASTNode* array_id = aa->child;
+                ASTNode* index = aa->child->sibling;
+
+                const char* idx = generate_expression(index, out);
+                const char* base = acquire_temp_register();
+                emit_array_base(array_id, out, base);
+
+                const char* off = acquire_temp_register();
+                fprintf(out, "    slli %s, %s, 2\n", off, idx);
+
+                const char* addr = acquire_temp_register();
+                fprintf(out, "    add %s, %s, %s\n", addr, base, off);
+
+                fprintf(out, "    sw %s, 0(%s)\n", v, addr);
+
+                release_temp_register(addr);
+                release_temp_register(off);
+                release_temp_register(base);
+                release_temp_register(idx);
+                return v;
+            }
+
+            return v;
         }
+
         case AST_FUNC_CALL: {
-            /* 函数调用: func(args) */
-            /* TODO: 完整的函数调用需要处理参数传递、保存寄存器等 */
-            /* 这里只是一个简化实现,返回 a0 (函数返回值寄存器) */
-            
-            /* 如果有参数列表,需要计算参数并传递到 a0-a7 */
+            /* simplified: pass up to 8 args in a0-a7 */
             if (node->child && node->child->type == AST_ARG_LIST) {
                 ASTNode* arg = node->child->child;
-                int arg_count = 0;
-                
-                /* 计算并传递参数 (最多 8 个) */
-                while (arg && arg_count < 8) {
-                    const char* arg_reg = generate_expression(arg, out);
-                    if (arg_reg) {
-                        if (strcmp(arg_reg, temp_registers[7]) != 0) {
-                            fprintf(out, "    mv a%d, %s\n", arg_count, arg_reg);
-                            release_temp_register(arg_reg);
+                int k = 0;
+                while (arg && k < 8) {
+                    const char* r = generate_expression(arg, out);
+                    if (r) {
+                        if (strcmp(r, "a0") != 0) {
+                            fprintf(out, "    addi a%d, %s, 0\n", k, r);
                         }
-                        arg_count++;
+                        release_temp_register(r);
                     }
+                    k++;
                     arg = arg->sibling;
                 }
             }
-            
-            /* 调用函数 */
-            if (node->value) {
-                fprintf(out, "    call %s\n", node->value);
-            }
-            
-            /* 函数返回值在 a0 中 */
-            const char* result_reg = acquire_temp_register();
-            fprintf(out, "    mv %s, a0\n", result_reg);
-            return result_reg;
+
+            if (node->value) fprintf(out, "    jal ra, %s\n", node->value);
+
+            const char* res = acquire_temp_register();
+            fprintf(out, "    addi %s, a0, 0\n", res);
+            return res;
         }
+
         default:
             return NULL;
     }
 }
 
-/* 语句代码生成 */
+/* ============ codegen statements ============ */
 static void generate_statement(ASTNode* node, FILE* out, bool* has_return);
 
 static void generate_statement_list(ASTNode* node, FILE* out, bool* has_return) {
     if (!node) return;
-    ASTNode* stmt = node->child;
-    while (stmt) {
-        generate_statement(stmt, out, has_return);
-        stmt = stmt->sibling;
-    }
+    for (ASTNode* s = node->child; s; s = s->sibling)
+        generate_statement(s, out, has_return);
 }
 
 static void generate_return_statement(ASTNode* node, FILE* out, bool* has_return) {
     *has_return = true;
+
     if (node->child) {
-        const char* result_reg = generate_expression(node->child, out);
-        fprintf(out, "    mv a0, %s\n", result_reg);
-        release_temp_register(result_reg);
+        const char* r = generate_expression(node->child, out);
+        fprintf(out, "    addi a0, %s, 0\n", r);
+        release_temp_register(r);
     } else {
-        fprintf(out, "    li a0, 0\n");
+        fprintf(out, "    addi a0, x0, 0\n");
     }
-    fprintf(out, "    ret\n");
+    fprintf(out, "    jal x0, %s\n", current_ret_label);
 }
 
 static void generate_if_statement(ASTNode* node, FILE* out, bool* has_return) {
     if (!node->child) return;
-    
+
     char* else_label = generate_label(".L_else");
-    char* end_label = generate_label(".L_end_if");
-    
-    /* 计算条件表达式 */
-    const char* cond_reg = generate_expression(node->child, out);
-    fprintf(out, "    beqz %s, %s\n", cond_reg, node->child->sibling->sibling ? else_label : end_label);
-    release_temp_register(cond_reg);
-    
-    /* then 分支 */
-    if (node->child->sibling) {
+    char* end_label  = generate_label(".L_end_if");
+
+    const char* cond = generate_expression(node->child, out);
+    bool has_else = (node->child->sibling && node->child->sibling->sibling);
+
+    fprintf(out, "    beq %s, x0, %s\n", cond, has_else ? else_label : end_label);
+    release_temp_register(cond);
+
+    if (node->child->sibling)
         generate_statement(node->child->sibling, out, has_return);
-    }
-    
-    /* else 分支 */
-    if (node->child->sibling && node->child->sibling->sibling) {
-        fprintf(out, "    j %s\n", end_label);
+
+    if (has_else) {
+        fprintf(out, "    jal x0, %s\n", end_label);
         fprintf(out, "%s:\n", else_label);
         generate_statement(node->child->sibling->sibling, out, has_return);
     }
-    
+
     fprintf(out, "%s:\n", end_label);
     free(else_label);
     free(end_label);
@@ -545,39 +676,37 @@ static void generate_if_statement(ASTNode* node, FILE* out, bool* has_return) {
 
 static void generate_while_statement(ASTNode* node, FILE* out, bool* has_return) {
     if (!node->child) return;
-    
-    char* loop_label = generate_label(".L_while");
-    char* end_label = generate_label(".L_end_while");
-    
+
+    char* loop_label = generate_label(".lop");
+    char* end_label  = generate_label(".end");
+
     fprintf(out, "%s:\n", loop_label);
-    
-    /* 计算条件表达式 */
-    const char* cond_reg = generate_expression(node->child, out);
-    fprintf(out, "    beqz %s, %s\n", cond_reg, end_label);
-    release_temp_register(cond_reg);
-    
-    /* 循环体 */
-    if (node->child->sibling) {
+
+    const char* cond = generate_expression(node->child, out);
+    fprintf(out, "    beq %s, x0, %s\n", cond, end_label);
+    release_temp_register(cond);
+
+    if (node->child->sibling)
         generate_statement(node->child->sibling, out, has_return);
-    }
-    
-    fprintf(out, "    j %s\n", loop_label);
+
+    fprintf(out, "    jal x0, %s\n", loop_label);
     fprintf(out, "%s:\n", end_label);
-    
+
     free(loop_label);
     free(end_label);
 }
 
 static void generate_statement(ASTNode* node, FILE* out, bool* has_return) {
     if (!node) return;
-    
+
     switch (node->type) {
-        case AST_EXPR_STMT:
+        case AST_EXPR_STMT: {
             if (node->child) {
-                const char* reg = generate_expression(node->child, out);
-                if (reg) release_temp_register(reg);
+                const char* r = generate_expression(node->child, out);
+                if (r) release_temp_register(r);
             }
             break;
+        }
         case AST_RETURN_STMT:
             generate_return_statement(node, out, has_return);
             break;
@@ -592,189 +721,117 @@ static void generate_statement(ASTNode* node, FILE* out, bool* has_return) {
             generate_statement_list(node, out, has_return);
             break;
         case AST_CONTINUE_STMT:
-            /* TODO: 实现 continue */
-            break;
         case AST_BREAK_STMT:
-            /* TODO: 实现 break */
+            /* TODO */
             break;
         default:
             break;
     }
 }
 
-/* 生成数据段 */
+/* ============ emit sections ============ */
 static void emit_data_section(FILE* out) {
     fprintf(out, ".data\n");
-    Symbol* current = symbol_head;
-    while (current) {
-        if (current->array_size > 0) {
-            /* 数组：分配多个字 */
-            fprintf(out, "%s: .word", current->label);
-            for (int i = 0; i < current->array_size; i++) {
-                fprintf(out, " 0");
-                if (i < current->array_size - 1) fprintf(out, ",");
+    for (Symbol* s = global_head; s; s = s->next) {
+        if (s->array_size > 0) {
+            fprintf(out, "%s: .word", s->label);
+            for (int i = 0; i < s->array_size; i++) {
+                fprintf(out, " 0%s", (i == s->array_size - 1) ? "" : ",");
             }
             fprintf(out, "\n");
         } else {
-            /* 普通变量 */
-            fprintf(out, "%s: .word 0\n", current->label);
+            fprintf(out, "%s: .word 0\n", s->label);
         }
-        current = current->next;
     }
     fprintf(out, "\n");
 }
 
-/* 生成代码段 */
 static void emit_text_section(ASTNode* root, FILE* out) {
     fprintf(out, ".text\n");
-    
-    /* 遍历所有函数声明，生成每个函数的代码 */
-    if (root->child && root->child->type == AST_DECL_LIST) {
-        ASTNode* decl = root->child->child;
-        ASTNode* main_func = NULL;
-        
-        /* 第一遍：找到 main 函数 */
-        ASTNode* temp = decl;
-        while (temp) {
-            if (temp->type == AST_FUN_DECL) {
-                ASTNode* type_node = temp->child;
-                ASTNode* ident_node = type_node ? type_node->sibling : NULL;
-                if (ident_node && ident_node->type == AST_IDENT && 
-                    ident_node->value && strcmp(ident_node->value, "main") == 0) {
-                    main_func = temp;
-                    break;
-                }
-            }
-            temp = temp->sibling;
+    if (!root || !root->child || root->child->type != AST_DECL_LIST) return;
+
+    for (ASTNode* decl = root->child->child; decl; decl = decl->sibling) {
+        if (decl->type != AST_FUN_DECL) continue;
+
+        ASTNode* type_node  = decl->child;
+        ASTNode* ident_node = type_node ? type_node->sibling : NULL;
+        ASTNode* params     = ident_node ? ident_node->sibling : NULL;
+        ASTNode* compound   = params ? params->sibling : NULL;
+
+        if (!compound || compound->type != AST_COMPOUND_STMT) continue;
+        if (!ident_node || ident_node->type != AST_IDENT || !ident_node->value) continue;
+
+        const char* fname = ident_node->value;
+
+        if (strcmp(fname, "main") == 0) fprintf(out, ".globl main\n");
+        fprintf(out, "%s:\n", fname);
+
+        /* compound children: local_decls, stmt_list */
+        ASTNode* local_decls = compound->child; /* AST_LOCAL_DECLS */
+        ASTNode* stmt_list   = local_decls ? local_decls->sibling : NULL; /* AST_STMT_LIST */
+
+        clear_locals();
+
+        int used = 0;
+        used = build_params(params, fname, used);
+        used = build_locals(local_decls, fname, used);
+        int frame = align16(used);
+
+        char* ret_label = (char*)malloc(96);
+        snprintf(ret_label, 96, ".L_ret_%s_%d", fname, label_counter++);
+        current_ret_label = ret_label;
+
+        emit_prologue(out, frame);
+        spill_params(out);
+
+        bool has_return = false;
+        if (stmt_list && stmt_list->type == AST_STMT_LIST) {
+            generate_statement_list(stmt_list, out, &has_return);
         }
-        
-        /* 第二遍：生成所有函数的代码 */
-        while (decl) {
-            if (decl->type == AST_FUN_DECL) {
-                ASTNode* type_node = decl->child;
-                ASTNode* ident_node = type_node ? type_node->sibling : NULL;
-                ASTNode* params = ident_node ? ident_node->sibling : NULL;
-                ASTNode* compound = params ? params->sibling : NULL;
-                
-                /* 跳过函数声明（没有函数体） */
-                if (!compound || compound->type != AST_COMPOUND_STMT) {
-                    decl = decl->sibling;
-                    continue;
-                }
-                
-                /* 函数标签 */
-                if (ident_node && ident_node->value) {
-                    /* main 函数需要 .globl 声明 */
-                    if (strcmp(ident_node->value, "main") == 0) {
-                        fprintf(out, ".globl main\n");
-                    }
-                    fprintf(out, "%s:\n", ident_node->value);
-                    
-                    /* 保存函数参数到内存 */
-                    if (params) {
-                        ASTNode* param_node = NULL;
-                        int param_index = 0;
-                        
-                        /* params 可能是 AST_PARAM_LIST 或 AST_PARAMS(void) */
-                        if (params->type == AST_PARAM_LIST) {
-                            /* 直接是参数列表 */
-                            param_node = params->child;
-                        } else if (params->type == AST_PARAMS && 
-                                   params->value && strcmp(params->value, "void") != 0) {
-                            /* 可能包含参数列表 */
-                            param_node = params->child;
-                        }
-                        
-                        /* 遍历参数并保存 */
-                        while (param_node && param_index < 8) {
-                            if (param_node->type == AST_PARAM) {
-                                /* 找到参数的 IDENT */
-                                ASTNode* param_child = param_node->child;
-                                while (param_child) {
-                                    if (param_child->type == AST_IDENT && param_child->value) {
-                                        const char* label = ensure_symbol(param_child->value);
-                                        fprintf(out, "    la t6, %s\n", label);
-                                        fprintf(out, "    sw a%d, 0(t6)\n", param_index);
-                                        param_index++;
-                                        break;
-                                    }
-                                    param_child = param_child->sibling;
-                                }
-                            }
-                            param_node = param_node->sibling;
-                        }
-                    }
-                    
-                    /* 生成函数体 */
-                    bool has_return = false;
-                    ASTNode* child = compound->child;
-                    while (child) {
-                        if (child->type == AST_STMT_LIST) {
-                            generate_statement_list(child, out, &has_return);
-                        }
-                        child = child->sibling;
-                    }
-                    
-                    /* 如果是 main 函数且没有 return，添加默认退出 */
-                    if (strcmp(ident_node->value, "main") == 0) {
-                        if (!has_return) {
-                            fprintf(out, "    li a0, 0\n");
-                        }
-                        fprintf(out, ".exit:\n");
-                        fprintf(out, "    li a7, 93\n");
-                        fprintf(out, "    ecall\n");
-                    } else {
-                        /* 其他函数如果没有 return，添加默认 return */
-                        if (!has_return) {
-                            fprintf(out, "    li a0, 0\n");
-                            fprintf(out, "    ret\n");
-                        }
-                    }
-                    fprintf(out, "\n");
-                }
-            }
-            decl = decl->sibling;
+
+        if (!has_return) {
+            fprintf(out, "    addi a0, x0, 0\n");
+            fprintf(out, "    jal x0, %s\n", current_ret_label);
         }
+
+        fprintf(out, "%s:\n", current_ret_label);
+        emit_epilogue(out, frame);
+
+        fprintf(out, "\n");
+        free(ret_label);
+        current_ret_label = NULL;
+        clear_locals();
     }
 }
 
-/* 生成汇编代码 */
-void generate_assembly(ASTNode* root) {
+/* ============ entry ============ */
+static void generate_assembly(ASTNode* root) {
     if (!root) return;
-    
+
     FILE* out = fopen("output.asm", "w");
     if (!out) {
-        fprintf(stderr, "Error: 无法打开输出文件 output.asm\n");
+        fprintf(stderr, "Error: cannot open output.asm\n");
         return;
     }
-    
-    printf("开始生成 RISC-V 汇编代码...\n");
-    
-    /* 收集符号 */
-    collect_symbols(root);
-    
-    /* 生成数据段 */
+
+    collect_globals(root);
     emit_data_section(out);
-    
-    /* 生成代码段 */
     emit_text_section(root, out);
-    
+
     fclose(out);
-    
-    printf("汇编代码已生成到 output.asm\n");
-    
-    /* 清理 */
-    free_symbol_table();
+
+    free_globals();
 }
 
-/* 前向声明 */
+/* bison/flex */
 extern int yylex();
 extern int yylineno;
 extern char* yytext;
-void yyerror(const char *s) {
+
+void yyerror(const char* s) {
     fprintf(stderr, "Error at line %d: %s\n", yylineno, s);
 }
-int Lineno = 1;
+
 %}
 
 %union {
@@ -839,12 +896,8 @@ var_decl : type_spec IDENT ';' {
     add_child($$, $4);
 };
 
-type_spec : VOID {
-    $$ = create_node(AST_TYPE_SPEC, "void");
-}
-| INT {
-    $$ = create_node(AST_TYPE_SPEC, "int");
-};
+type_spec : VOID { $$ = create_node(AST_TYPE_SPEC, "void"); }
+| INT { $$ = create_node(AST_TYPE_SPEC, "int"); };
 
 fun_decl : type_spec IDENT '(' params ')' compound_stmt {
     $$ = create_node(AST_FUN_DECL, NULL);
@@ -861,9 +914,7 @@ fun_decl : type_spec IDENT '(' params ')' compound_stmt {
 };
 
 params : param_list { $$ = $1; }
-| VOID {
-    $$ = create_node(AST_PARAMS, "void");
-};
+| VOID { $$ = create_node(AST_PARAMS, "void"); };
 
 param_list : param_list ',' param {
     $$ = $1;
@@ -1091,12 +1142,8 @@ expr : expr OR expr {
     $$->op = strdup("$");
     add_child($$, $2);
 }
-| '(' expr ')' {
-    $$ = $2;
-}
-| IDENT {
-    $$ = create_node(AST_IDENT, $1);
-}
+| '(' expr ')' { $$ = $2; }
+| IDENT { $$ = create_node(AST_IDENT, $1); }
 | IDENT '[' expr ']' {
     $$ = create_node(AST_ARRAY_ACCESS, NULL);
     add_child($$, create_node(AST_IDENT, $1));
@@ -1106,9 +1153,7 @@ expr : expr OR expr {
     $$ = create_node(AST_FUNC_CALL, $1);
     add_child($$, $3);
 }
-| int_literal {
-    $$ = $1;
-}
+| int_literal { $$ = $1; }
 | expr '&' expr {
     $$ = create_node(AST_BINARY_EXPR, NULL);
     $$->op = strdup("&");
@@ -1149,7 +1194,6 @@ int_literal : DECNUM {
     $$ = create_node(AST_INT_LITERAL, $1);
 }
 | HEXNUM {
-    /* 将十六进制转换为十进制字符串 */
     char buffer[32];
     unsigned long val = strtoul($1, NULL, 16);
     snprintf(buffer, sizeof(buffer), "%lu", val);
@@ -1166,29 +1210,21 @@ arg_list : arg_list ',' expr {
 };
 
 args : arg_list { $$ = $1; }
-| {
-    $$ = create_node(AST_ARG_LIST, NULL);
-};
+| { $$ = create_node(AST_ARG_LIST, NULL); };
 
-continue_stmt : CONTINUE ';' {
-    $$ = create_node(AST_CONTINUE_STMT, NULL);
-};
-
-break_stmt : BREAK ';' {
-    $$ = create_node(AST_BREAK_STMT, NULL);
-};
+continue_stmt : CONTINUE ';' { $$ = create_node(AST_CONTINUE_STMT, NULL); };
+break_stmt : BREAK ';' { $$ = create_node(AST_BREAK_STMT, NULL); };
 
 %%
 
 int main() {
     printf("开始解析 MiniC 程序...\n");
-    
+
     int result = yyparse();
-    
     if (result == 0) {
         printf("解析成功！\n");
         printf("AST 节点总数: %d\n\n", node_count);
-        
+
         if (ast_root) {
             generate_assembly(ast_root);
             free_ast(ast_root);
@@ -1196,6 +1232,5 @@ int main() {
     } else {
         printf("解析失败！\n");
     }
-    
     return result;
 }
