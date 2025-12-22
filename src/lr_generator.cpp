@@ -538,6 +538,68 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
 
     ss << "#include \"" << headerName << "\"\n";
     ss << "#include <stdio.h> /* 包含标准输入输出库，因为使用了printf */\n";
+    ss << "#include <stdlib.h>\n";
+    ss << "#include <string.h>\n\n";
+
+    // 添加错误收集结构
+    ss << "/* 错误收集功能 */\n";
+    ss << "typedef struct ErrorInfo {\n";
+    ss << "    int line;\n";
+    ss << "    char* message;\n";
+    ss << "    char* actual_token;\n";
+    ss << "    char** expected_tokens;\n";
+    ss << "    int expected_count;\n";
+    ss << "} ErrorInfo;\n\n";
+    
+    ss << "static ErrorInfo* errors = NULL;\n";
+    ss << "static int error_count = 0;\n";
+    ss << "static int error_capacity = 0;\n\n";
+    
+    ss << "static void add_error(int line, const char* msg, const char* actual, \n";
+    ss << "                     const char** expected, int exp_count) {\n";
+    ss << "    if (error_count >= error_capacity) {\n";
+    ss << "        error_capacity = error_capacity == 0 ? 10 : error_capacity * 2;\n";
+    ss << "        errors = (ErrorInfo*)realloc(errors, error_capacity * sizeof(ErrorInfo));\n";
+    ss << "    }\n";
+    ss << "    ErrorInfo* err = &errors[error_count];\n";
+    ss << "    err->line = line;\n";
+    ss << "    err->message = strdup(msg);\n";
+    ss << "    err->actual_token = actual ? strdup(actual) : NULL;\n";
+    ss << "    err->expected_count = exp_count;\n";
+    ss << "    if (exp_count > 0 && expected) {\n";
+    ss << "        err->expected_tokens = (char**)malloc(exp_count * sizeof(char*));\n";
+    ss << "        for (int i = 0; i < exp_count; i++) {\n";
+    ss << "            err->expected_tokens[i] = strdup(expected[i]);\n";
+    ss << "        }\n";
+    ss << "    } else {\n";
+    ss << "        err->expected_tokens = NULL;\n";
+    ss << "    }\n";
+    ss << "    error_count++;\n";
+    ss << "}\n\n";
+    
+    ss << "static void print_errors_json(void) {\n";
+    ss << "    printf(\"{\\n\");\n";
+    ss << "    printf(\"  \\\"errors\\\": [\\n\");\n";
+    ss << "    for (int i = 0; i < error_count; i++) {\n";
+    ss << "        ErrorInfo* err = &errors[i];\n";
+    ss << "        printf(\"    {\\n\");\n";
+    ss << "        printf(\"      \\\"line\\\": %d,\\n\", err->line);\n";
+    ss << "        printf(\"      \\\"message\\\": \\\"%s\\\",\\n\", err->message);\n";
+    ss << "        if (err->actual_token) {\n";
+    ss << "            printf(\"      \\\"actual\\\": \\\"%s\\\",\\n\", err->actual_token);\n";
+    ss << "        }\n";
+    ss << "        printf(\"      \\\"expected\\\": [\");\n";
+    ss << "        for (int j = 0; j < err->expected_count; j++) {\n";
+    ss << "            printf(\"\\\"%s\\\"\", err->expected_tokens[j]);\n";
+    ss << "            if (j < err->expected_count - 1) printf(\", \");\n";
+    ss << "        }\n";
+    ss << "        printf(\"]\\n\");\n";
+    ss << "        printf(\"    }%s\\n\", i < error_count - 1 ? \",\" : \"\");\n";
+    ss << "    }\n";
+    ss << "    printf(\"  ],\\n\");\n";
+    ss << "    printf(\"  \\\"errorCount\\\": %d\\n\", error_count);\n";
+    ss << "    printf(\"}\\n\");\n";
+    ss << "}\n\n";
 
     // 添加用户声明代码块
     if (!parser.declaration_code.empty()) {
@@ -641,6 +703,15 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
         ss << "\n";
     }
     ss << "};\n\n";
+
+    // 添加 token 名称表
+    ss << "/* Token 名称表 */\n";
+    ss << "static const char* yytname[] = {\n";
+    ss << "  \"$end\"";
+    for (const auto& terminal : terminals) {
+        ss << ",\n  \"" << terminal.name << "\"";
+    }
+    ss << "\n};\n\n";
 
     // 生成GOTO表
     ss << "static const short yygoto[] = {\n";
@@ -779,7 +850,23 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
     ss << "    printf(\"查找动作: yytable[%d * %d + %d] = %d (raw token %d)\\n\", state, YYNTOKENS, token, action, token_raw);\n\n";
 
     ss << "    if (action == -32767) { /* 错误 */\n";
-    ss << "      yyerror(\"语法错误\");\n";
+    ss << "      /* 收集期待的 token */\n";
+    ss << "      const char* expected[YYNTOKENS];\n";
+    ss << "      int expected_count = 0;\n";
+    ss << "      for (int i = 0; i < YYNTOKENS; i++) {\n";
+    ss << "        int test_action = yytable[state * YYNTOKENS + i];\n";
+    ss << "        if (test_action != -32767) {\n";
+    ss << "          expected[expected_count++] = yytname[i];\n";
+    ss << "        }\n";
+    ss << "      }\n";
+    ss << "      \n";
+    ss << "      /* 记录错误 */\n";
+    ss << "      extern int yylineno;\n";
+    ss << "      extern char* yytext;\n";
+    ss << "      add_error(yylineno, \"syntax error, unexpected token\", yytext, expected, expected_count);\n";
+    ss << "      \n";
+    ss << "      /* 输出错误并退出 */\n";
+    ss << "      print_errors_json();\n";
     ss << "      return 1;\n";
     ss << "    }\n\n";
 
@@ -832,11 +919,22 @@ std::string LRGenerator::generateParserCode(const std::string& filename) const
     ss << "      printf(\"规约后的新状态: %d\\n\", state);\n";
     ss << "    } else { /* 接受 */\n";
     ss << "      printf(\"接受输入, 分析成功完成!\\n\");\n";
+    ss << "      if (error_count > 0) {\n";
+    ss << "        print_errors_json();\n";
+    ss << "        return 1;\n";
+    ss << "      }\n";
     ss << "      return 0;\n";
     ss << "    }\n";
     ss << "    printf(\"--------------------\\n\");\n"; // 分隔不同的状态转换
     ss << "  }\n";
     ss << "  printf(\"====== 语法分析结束 ======\\n\");\n";
+    ss << "  \n";
+    ss << "  /* 如果有错误，输出 JSON */\n";
+    ss << "  if (error_count > 0) {\n";
+    ss << "    print_errors_json();\n";
+    ss << "    return 1;\n";
+    ss << "  }\n";
+    ss << "  return 0;\n";
     ss << "}\n\n";
 
     // 添加用户代码

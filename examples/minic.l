@@ -1,3 +1,5 @@
+%option yylineno
+
 digit [0-9]
 letter [a-zA-Z]
 id {letter}({letter}|{digit})*
@@ -9,7 +11,6 @@ hex 0(x|X)({letter}|[0-9])+
 #include "minic.tab.h"
 #include <stdlib.h>
 extern int Lineno;
-extern int yylineno;
 
 int ConvertHexToint(char* str) {
     return (int)strtol(str, NULL, 16);

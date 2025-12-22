@@ -1232,5 +1232,7 @@ int main() {
     } else {
         printf("解析失败！\n");
     }
+    
+    free_globals();
     return result;
 }
