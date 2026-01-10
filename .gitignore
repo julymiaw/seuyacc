@@ -22,4 +22,5 @@ examples/lex.yy.c
 examples/ast.dot
 
 报告/*
+*.docx
 
